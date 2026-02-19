@@ -330,31 +330,39 @@ async def run_us_leaps_backtest(
 
                     if best is not None:
                         strike, price, atv, intr, tv = best
-                        cost = price * qty * mult
+                        cost_per_contract = price * mult
+                        cost = cost_per_contract * qty
                         scan_entry["selected_strike"] = float(round(strike, 2))
 
-                        if cost <= cash and cost > 0:
+                        # 如果资金不足以买指定数量，自动减少合约数
+                        actual_qty = qty
+                        if cost > cash and cost_per_contract > 0:
+                            actual_qty = int(cash / cost_per_contract)
+                            cost = cost_per_contract * actual_qty
+
+                        if actual_qty > 0 and cost <= cash and cost > 0:
                             cash -= cost
                             position = {
                                 "strike": strike, "expiry": expiry,
-                                "quantity": qty, "open_price": float(price),
+                                "quantity": actual_qty, "open_price": float(price),
                                 "open_date": today,
                             }
+                            qty_note = f"(原计划{qty}张,实际{actual_qty}张)" if actual_qty != qty else ""
                             trades.append({
                                 "date": today.isoformat(), "action": "OPEN",
                                 "strike": float(round(strike, 2)),
                                 "expiry": expiry.isoformat(),
                                 "spot": float(round(spot, 2)),
                                 "option_price": float(round(price, 2)),
-                                "quantity": qty,
+                                "quantity": actual_qty,
                                 "cash_flow": float(round(-cost, 2)),
                                 "equity_after": float(round(cash, 2)),
                                 "data_source": "BS模型",
-                                "note": f"买入CALL, 年化TV%={atv:.2f}%, 到期{expiry}",
+                                "note": f"买入CALL{qty_note}, 年化TV%={atv:.2f}%, 到期{expiry}",
                             })
-                            scan_entry["result"] = f"开仓(cost=${cost:.2f})"
+                            scan_entry["result"] = f"开仓({actual_qty}张, cost=${cost:.2f})"
                         else:
-                            scan_entry["result"] = f"资金不足(需${cost:.2f})"
+                            scan_entry["result"] = f"资金不足(需${cost_per_contract:.2f}/张, 有${cash:.2f})"
                     else:
                         scan_entry["result"] = "未找到合约"
 
