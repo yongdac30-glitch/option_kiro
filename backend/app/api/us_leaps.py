@@ -119,6 +119,8 @@ class USLeapsConfig(BaseModel):
     num_strikes: int = Field(default=15, description="扫描行权价数量")
     open_interval_days: int = Field(default=30)
     default_iv: float = Field(default=0.3, description="回测默认IV")
+    enable_roll: bool = Field(default=False, description="是否启用换仓逻辑")
+    roll_annual_tv_pct: float = Field(default=8.0, description="换仓年化TV差值阈值%")
 
 
 # ── US stock strike step logic ───────────────────────────────────────
@@ -296,6 +298,92 @@ async def run_us_leaps_backtest(
 
         return best, scanned
 
+    def _check_roll(today, spot, position):
+        """Check if we should roll to a further-dated contract (BS model).
+        Same logic as LEAPS终极2.0: scan further expiries from ATM downward,
+        if (far_tv - cur_tv) annualized < threshold, roll."""
+        cur_expiry = position["expiry"]
+        cur_strike = position["strike"]
+
+        cur_price, _ = _bs_price(spot, cur_strike, cur_expiry, today)
+        if cur_price <= 0:
+            return None, []
+
+        cur_intrinsic = max(0.0, spot - cur_strike)
+        cur_tv = max(0.0, cur_price - cur_intrinsic)
+
+        # Generate further expiries (at least 30 days beyond current)
+        all_expiries = _generate_us_leaps_expiries(today, 0)
+        further = [e for e in all_expiries
+                   if e > cur_expiry and (e - cur_expiry).days >= 30]
+        further.sort(reverse=True)  # furthest first
+
+        step = _us_strike_step(spot)
+        atm = _nearest_strike(spot, step)
+
+        roll_scanned = []
+        roll_target = None
+
+        for far_expiry in further:
+            far_days = max((far_expiry - today).days, 1)
+
+            for i in range(config.num_strikes + 1):
+                far_strike = atm - i * step
+                if far_strike <= 0:
+                    continue
+
+                far_price, far_src = _bs_price(spot, far_strike, far_expiry, today)
+
+                if far_price <= 0:
+                    roll_scanned.append({
+                        "strike": float(far_strike),
+                        "expiry": far_expiry.isoformat(),
+                        "price": 0, "far_tv": 0, "cur_tv": float(round(cur_tv, 2)),
+                        "tv_diff": 0, "annual_roll_cost": None,
+                        "selected": False, "note": "无数据",
+                    })
+                    continue
+
+                far_intrinsic = max(0.0, spot - far_strike)
+                far_tv = max(0.0, far_price - far_intrinsic)
+                tv_diff = far_tv - cur_tv
+                annual_roll_cost = (tv_diff / far_strike) * (365.0 / far_days) * 100.0 if far_strike > 0 else 999.0
+
+                entry = {
+                    "strike": float(round(far_strike, 2)),
+                    "expiry": far_expiry.isoformat(),
+                    "price": float(round(far_price, 2)),
+                    "far_tv": float(round(far_tv, 2)),
+                    "cur_tv": float(round(cur_tv, 2)),
+                    "tv_diff": float(round(tv_diff, 2)),
+                    "annual_roll_cost": float(round(annual_roll_cost, 2)),
+                    "selected": False,
+                    "note": "",
+                }
+
+                if annual_roll_cost < config.roll_annual_tv_pct:
+                    if roll_target is None:
+                        roll_target = {
+                            "strike": far_strike, "expiry": far_expiry,
+                            "price": far_price, "src": far_src,
+                            "annual_roll_cost": annual_roll_cost,
+                            "far_tv": far_tv, "cur_tv": cur_tv,
+                            "cur_price": cur_price,
+                        }
+                        entry["selected"] = True
+                        entry["note"] = f"✓ 换仓目标(年化成本={annual_roll_cost:.2f}%)"
+                    else:
+                        entry["note"] = f"满足阈值(已选更优)"
+                else:
+                    entry["note"] = f"年化成本={annual_roll_cost:.2f}% > {config.roll_annual_tv_pct}%"
+
+                roll_scanned.append(entry)
+
+            if roll_target is not None:
+                break
+
+        return roll_target, roll_scanned
+
     # Build observation dates
     observe_dates = []
     if dates:
@@ -309,6 +397,7 @@ async def run_us_leaps_backtest(
             observe_dates.append(dates[-1])
 
     _total[0] = len(observe_dates)
+    roll_count = 0
 
     for day_idx, today in enumerate(observe_dates):
         spot = price_map[today]
@@ -336,6 +425,91 @@ async def run_us_leaps_backtest(
                     "note": f"到期前{days_left}天平仓, PnL=${pnl:.2f}",
                 })
                 position = None
+
+        # 1.5) If holding and not closing, check roll
+        if position is not None and config.enable_roll:
+            roll_target, roll_scanned = _check_roll(today, spot, position)
+
+            roll_scan_entry = {
+                "date": today.isoformat(),
+                "spot": float(round(spot, 2)),
+                "expiry": position["expiry"].isoformat(),
+                "days_to_expiry": (position["expiry"] - today).days,
+                "candidates": [],
+                "selected_strike": None,
+                "selected_expiry": None,
+                "roll_candidates": roll_scanned,
+                "result": "",
+            }
+
+            if roll_target is not None:
+                old_strike = position["strike"]
+                old_expiry = position["expiry"]
+
+                # Close current position
+                cur_price = roll_target["cur_price"]
+                close_proceeds = cur_price * position["quantity"] * mult
+                cash += close_proceeds
+                pnl_close = (cur_price - position["open_price"]) * position["quantity"] * mult
+
+                trades.append({
+                    "date": today.isoformat(), "action": "CLOSE",
+                    "strike": float(round(old_strike, 2)),
+                    "expiry": old_expiry.isoformat(),
+                    "spot": float(round(spot, 2)),
+                    "option_price": float(round(cur_price, 2)),
+                    "quantity": position["quantity"],
+                    "cash_flow": float(round(close_proceeds, 2)),
+                    "equity_after": float(round(cash, 2)),
+                    "data_source": "roll",
+                    "note": f"换仓平仓 K={old_strike}, PnL=${pnl_close:.2f}",
+                })
+
+                # Open new position
+                new_strike = roll_target["strike"]
+                new_expiry = roll_target["expiry"]
+                new_price = roll_target["price"]
+                new_cost = new_price * qty * mult
+
+                actual_qty = qty
+                if new_cost > cash and new_price * mult > 0:
+                    actual_qty = int(cash / (new_price * mult))
+                    new_cost = new_price * actual_qty * mult
+
+                if actual_qty > 0 and new_cost <= cash and new_cost > 0:
+                    cash -= new_cost
+                    position = {
+                        "strike": new_strike, "expiry": new_expiry,
+                        "quantity": actual_qty, "open_price": float(new_price),
+                        "open_date": today,
+                    }
+                    qty_note = f"(原计划{qty}张,实际{actual_qty}张)" if actual_qty != qty else ""
+                    trades.append({
+                        "date": today.isoformat(), "action": "ROLL",
+                        "strike": float(round(new_strike, 2)),
+                        "expiry": new_expiry.isoformat(),
+                        "spot": float(round(spot, 2)),
+                        "option_price": float(round(new_price, 2)),
+                        "quantity": actual_qty,
+                        "cash_flow": float(round(-new_cost, 2)),
+                        "equity_after": float(round(cash, 2)),
+                        "data_source": "BS模型",
+                        "note": f"换仓至 K={new_strike}{qty_note}, 到期{new_expiry}, "
+                                f"年化换仓成本={roll_target['annual_roll_cost']:.2f}%",
+                    })
+                    roll_count += 1
+                    roll_scan_entry["selected_strike"] = float(round(new_strike, 2))
+                    roll_scan_entry["selected_expiry"] = new_expiry.isoformat()
+                    roll_scan_entry["result"] = f"换仓(K={old_strike}→{new_strike}, 到期{old_expiry}→{new_expiry})"
+                else:
+                    roll_scan_entry["result"] = f"换仓资金不足(需${new_cost:.2f}, 有${cash:.2f})"
+                    position = None  # already closed above
+            else:
+                days_left = (position["expiry"] - today).days
+                roll_scan_entry["result"] = f"持仓中(K={position['strike']}, 剩余{days_left}天, 无需换仓)"
+
+            if roll_scanned:
+                scan_logs.append(roll_scan_entry)
 
         # 2) Open new position
         if position is None and cash > 0:
@@ -500,6 +674,7 @@ async def run_us_leaps_backtest(
         "max_drawdown_pct": float(round(max_dd * 100, 2)),
         "open_count": sum(1 for t in trades if t["action"] == "OPEN"),
         "close_count": sum(1 for t in trades if t["action"] == "CLOSE"),
+        "roll_count": roll_count,
         "backtest_days": days_total,
         "default_iv": float(iv),
         "sharpe_ratio": float(round(strategy_sharpe, 3)),
@@ -529,6 +704,8 @@ class BacktestRequest(BaseModel):
     num_strikes: int = Field(default=15)
     open_interval_days: int = Field(default=30)
     default_iv: float = Field(default=0.3)
+    enable_roll: bool = Field(default=False)
+    roll_annual_tv_pct: float = Field(default=8.0)
 
 
 @router.post("/backtest-stream")
@@ -549,6 +726,8 @@ async def us_leaps_stream(req: BacktestRequest):
         num_strikes=req.num_strikes,
         open_interval_days=req.open_interval_days,
         default_iv=req.default_iv,
+        enable_roll=req.enable_roll,
+        roll_annual_tv_pct=req.roll_annual_tv_pct,
     )
 
     async def event_generator():

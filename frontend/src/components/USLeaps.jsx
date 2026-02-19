@@ -7,7 +7,7 @@ import { useState, useRef } from 'react';
 import {
   Layout, Card, Form, Input, InputNumber, DatePicker, Button,
   Row, Col, Typography, Space, Table, Tag, Statistic, Divider,
-  message, Progress, Alert, Collapse, Steps, Spin,
+  message, Progress, Alert, Collapse, Steps, Spin, Switch,
 } from 'antd';
 import {
   ArrowLeftOutlined, DollarOutlined, InfoCircleOutlined,
@@ -105,6 +105,8 @@ export default function USLeaps() {
       num_strikes: values.num_strikes,
       open_interval_days: values.open_interval_days,
       default_iv: values.default_iv,
+      enable_roll: values.enable_roll || false,
+      roll_annual_tv_pct: values.roll_annual_tv_pct || 8,
     };
     try {
       abortRef.current = usLeapsService.backtestStream(
@@ -230,6 +232,8 @@ export default function USLeaps() {
                 num_strikes: 15,
                 open_interval_days: 30,
                 default_iv: 0.3,
+                enable_roll: false,
+                roll_annual_tv_pct: 8,
               }}
             >
               <Divider orientation="left" plain>基础参数</Divider>
@@ -319,6 +323,23 @@ export default function USLeaps() {
                 <Col xs={24} sm={6}>
                   <Form.Item name="open_interval_days" label="检查间隔(天)">
                     <InputNumber style={{ width: '100%' }} min={7} max={90} step={7} />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Divider orientation="left" plain>换仓参数</Divider>
+              <Row gutter={16}>
+                <Col xs={24} sm={6}>
+                  <Form.Item name="enable_roll" label="启用换仓" valuePropName="checked"
+                    tooltip="持仓期间检查是否有更优的远期合约可换仓">
+                    <Switch checkedChildren="开" unCheckedChildren="关" />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} sm={6}>
+                  <Form.Item name="roll_annual_tv_pct" label="换仓年化TV阈值%"
+                    tooltip="换仓年化成本低于此阈值时执行换仓">
+                    <InputNumber style={{ width: '100%' }} min={1} max={30} step={0.5} precision={1}
+                      formatter={(v) => v + '%'} parser={(v) => v.replace('%', '')} />
                   </Form.Item>
                 </Col>
               </Row>
@@ -426,6 +447,12 @@ export default function USLeaps() {
                   <Col xs={12} sm={6}>
                     <Statistic title="平仓次数" value={result.summary.close_count} />
                   </Col>
+                  {result.summary.roll_count > 0 && (
+                    <Col xs={12} sm={6}>
+                      <Statistic title="换仓次数" value={result.summary.roll_count}
+                        valueStyle={{ color: '#faad14', fontWeight: 700 }} />
+                    </Col>
+                  )}
                 </Row>
                 <Divider />
                 <Row gutter={[24, 16]}>
@@ -490,15 +517,57 @@ export default function USLeaps() {
                           <Text>spot=${log.spot?.toLocaleString()}</Text>
                           <Text type="secondary">expiry={log.expiry}</Text>
                           {log.selected_strike && <Tag color="green">K=${log.selected_strike}</Tag>}
-                          <Tag color={log.result?.includes('开仓') ? 'green' : 'orange'}>{log.result}</Tag>
+                          {log.selected_expiry && <Tag color="gold">→{log.selected_expiry}</Tag>}
+                          <Tag color={
+                            log.result?.includes('开仓') ? 'green' :
+                            log.result?.includes('换仓(') ? 'gold' :
+                            log.result?.includes('持仓中') ? 'blue' : 'orange'
+                          }>{log.result}</Tag>
                         </Space>
                       }>
-                        <Table
-                          columns={btScanCols}
-                          dataSource={log.candidates?.map((c, j) => ({ ...c, key: j })) || []}
-                          size="small" pagination={false} scroll={{ x: 900 }}
-                          rowClassName={(r) => r.selected ? 'ant-table-row-selected' : ''}
-                        />
+                        {log.candidates && log.candidates.length > 0 && (
+                          <>
+                            <Text strong style={{ display: 'block', marginBottom: 4 }}>开仓扫描:</Text>
+                            <Table
+                              columns={btScanCols}
+                              dataSource={log.candidates.map((c, j) => ({ ...c, key: j }))}
+                              size="small" pagination={false} scroll={{ x: 900 }}
+                              rowClassName={(r) => r.selected ? 'ant-table-row-selected' : ''}
+                            />
+                          </>
+                        )}
+                        {log.roll_candidates && log.roll_candidates.length > 0 && (
+                          <>
+                            <Text strong style={{ display: 'block', margin: '12px 0 4px' }}>换仓扫描:</Text>
+                            <Table
+                              columns={[
+                                { title: '行权价', dataIndex: 'strike', key: 'strike', width: 90,
+                                  render: (v) => '$' + v?.toLocaleString() },
+                                { title: '到期日', dataIndex: 'expiry', key: 'expiry', width: 100 },
+                                { title: '期权价', dataIndex: 'price', key: 'price', width: 90,
+                                  render: (v) => v > 0 ? '$' + v?.toFixed(2) : '-' },
+                                { title: '远期TV', dataIndex: 'far_tv', key: 'far_tv', width: 80,
+                                  render: (v) => v > 0 ? '$' + v?.toFixed(2) : '-' },
+                                { title: '当前TV', dataIndex: 'cur_tv', key: 'cur_tv', width: 80,
+                                  render: (v) => '$' + v?.toFixed(2) },
+                                { title: 'TV差值', dataIndex: 'tv_diff', key: 'tv_diff', width: 80,
+                                  render: (v) => v != null ? '$' + v?.toFixed(2) : '-' },
+                                { title: '年化成本%', dataIndex: 'annual_roll_cost', key: 'annual_roll_cost', width: 100,
+                                  render: (v) => v != null ? (
+                                    <span style={{ color: v < 8 ? '#389e0d' : '#faad14', fontWeight: 600 }}>
+                                      {v.toFixed(2)}%
+                                    </span>
+                                  ) : '-' },
+                                { title: '', dataIndex: 'selected', key: 'selected', width: 40,
+                                  render: (v) => v ? <Tag color="gold">✓</Tag> : null },
+                                { title: '备注', dataIndex: 'note', key: 'note', ellipsis: true },
+                              ]}
+                              dataSource={log.roll_candidates.map((c, j) => ({ ...c, key: 'r' + j }))}
+                              size="small" pagination={false} scroll={{ x: 900 }}
+                              rowClassName={(r) => r.selected ? 'ant-table-row-selected' : ''}
+                            />
+                          </>
+                        )}
                       </Collapse.Panel>
                     ))}
                   </Collapse>
