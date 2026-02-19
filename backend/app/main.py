@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.database import init_db
-from app.api import positions, market_prices, volatility, pnl, portfolio, iv, hedge, okx, backtest, deribit, deribit_debug, okx_xau, leaps, leaps_ultimate, leaps_ultimate_v2
+from app.api import positions, market_prices, volatility, pnl, portfolio, iv, hedge, okx, backtest, deribit, deribit_debug, okx_xau, leaps, leaps_ultimate, leaps_ultimate_v2, us_leaps
 from app.models import DeribitPriceCache, DeribitIVCache, OkxXauTick  # ensure tables are registered
 
 # Create FastAPI application
@@ -39,6 +39,7 @@ app.include_router(okx_xau.router)
 app.include_router(leaps.router)
 app.include_router(leaps_ultimate.router)
 app.include_router(leaps_ultimate_v2.router)
+app.include_router(us_leaps.router)
 
 
 @app.on_event("startup")

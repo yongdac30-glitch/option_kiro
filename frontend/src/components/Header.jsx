@@ -3,7 +3,7 @@
  * Application header with title and navigation
  */
 import { Layout, Typography, Space } from 'antd';
-import { LineChartOutlined, CalculatorOutlined, ExperimentOutlined, DatabaseOutlined, BugOutlined, CheckCircleOutlined, RocketOutlined, CrownOutlined, SwapOutlined } from '@ant-design/icons';
+import { LineChartOutlined, CalculatorOutlined, ExperimentOutlined, DatabaseOutlined, BugOutlined, CheckCircleOutlined, RocketOutlined, CrownOutlined, SwapOutlined, DollarOutlined } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 
 const { Header: AntHeader } = Layout;
@@ -58,6 +58,10 @@ export default function Header() {
         <Link to="/leaps-ultimate-v2" style={{ color: '#722ed1', fontSize: 14, display: 'flex', alignItems: 'center', gap: 6 }}>
           <SwapOutlined />
           终极2.0
+        </Link>
+        <Link to="/us-leaps" style={{ color: '#52c41a', fontSize: 14, display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600 }}>
+          <DollarOutlined />
+          美股LEAPS
         </Link>
       </Space>
     </AntHeader>

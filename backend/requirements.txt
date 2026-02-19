@@ -28,3 +28,6 @@ websockets>=12.0
 
 # Environment Variables
 python-dotenv>=1.0.0
+
+# US Stock Data
+yfinance>=0.2.36
