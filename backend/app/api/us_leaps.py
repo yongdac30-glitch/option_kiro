@@ -30,13 +30,40 @@ US_RISK_FREE_RATE = 0.045
 US_CONTRACT_MULTIPLIER = 100  # 1 contract = 100 shares
 
 
+def _safe_float(val, default=0.0):
+    """Safely convert a value to float, handling NaN/None/inf."""
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_int(val, default=0):
+    """Safely convert a value to int, handling NaN/None."""
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return int(f)
+    except (ValueError, TypeError):
+        return default
+
+
 # ── yfinance helpers ─────────────────────────────────────────────────
 
 def _get_spot_price(ticker_symbol: str) -> float:
     """Get current spot price via yfinance."""
     t = yf.Ticker(ticker_symbol)
     info = t.fast_info
-    return float(info.get("lastPrice", 0) or info.get("previousClose", 0))
+    price = _safe_float(info.get("lastPrice", 0)) or _safe_float(info.get("previousClose", 0))
+    return price
 
 
 def _get_historical_prices(ticker_symbol: str, start: date, end: date) -> Dict[date, float]:
@@ -655,9 +682,9 @@ async def us_leaps_live_scan(req: LiveScanRequest):
             r = row.iloc[0]
             actual_strike = float(r["strike"])
             # Use mid price if available, else lastPrice
-            bid = float(r.get("bid", 0) or 0)
-            ask = float(r.get("ask", 0) or 0)
-            price = (bid + ask) / 2 if bid > 0 and ask > 0 else float(r.get("lastPrice", 0) or 0)
+            bid = _safe_float(r.get("bid", 0))
+            ask = _safe_float(r.get("ask", 0))
+            price = (bid + ask) / 2 if bid > 0 and ask > 0 else _safe_float(r.get("lastPrice", 0))
 
             if price <= 0:
                 scanned.append({
@@ -670,9 +697,9 @@ async def us_leaps_live_scan(req: LiveScanRequest):
                 })
                 continue
 
-            iv_val = float(r.get("impliedVolatility", 0) or 0)
-            volume = int(r.get("volume", 0) or 0)
-            oi = int(r.get("openInterest", 0) or 0)
+            iv_val = _safe_float(r.get("impliedVolatility", 0))
+            volume = _safe_int(r.get("volume", 0))
+            oi = _safe_int(r.get("openInterest", 0))
             intrinsic = max(0.0, spot - actual_strike)
             tv = max(0.0, price - intrinsic)
             annual_tv_pct = (tv / actual_strike) * (365.0 / days_to_exp) * 100.0
@@ -739,9 +766,9 @@ async def us_leaps_live_scan(req: LiveScanRequest):
                     if row2.empty:
                         continue
                     r2 = row2.iloc[0]
-                    bid2 = float(r2.get("bid", 0) or 0)
-                    ask2 = float(r2.get("ask", 0) or 0)
-                    p2 = (bid2 + ask2) / 2 if bid2 > 0 and ask2 > 0 else float(r2.get("lastPrice", 0) or 0)
+                    bid2 = _safe_float(r2.get("bid", 0))
+                    ask2 = _safe_float(r2.get("ask", 0))
+                    p2 = (bid2 + ask2) / 2 if bid2 > 0 and ask2 > 0 else _safe_float(r2.get("lastPrice", 0))
                     if p2 <= 0:
                         continue
                     intr2 = max(0.0, spot - float(r2["strike"]))
@@ -752,9 +779,9 @@ async def us_leaps_live_scan(req: LiveScanRequest):
                         "price": float(round(p2, 2)),
                         "bid": float(round(bid2, 2)),
                         "ask": float(round(ask2, 2)),
-                        "iv": float(round(float(r2.get("impliedVolatility", 0) or 0), 4)),
-                        "volume": int(r2.get("volume", 0) or 0),
-                        "open_interest": int(r2.get("openInterest", 0) or 0),
+                        "iv": float(round(_safe_float(r2.get("impliedVolatility", 0)), 4)),
+                        "volume": _safe_int(r2.get("volume", 0)),
+                        "open_interest": _safe_int(r2.get("openInterest", 0)),
                         "intrinsic": float(round(intr2, 2)),
                         "time_value": float(round(tv2, 2)),
                         "annual_tv_pct": float(round(atv2, 2)),
