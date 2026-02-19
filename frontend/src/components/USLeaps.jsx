@@ -7,11 +7,12 @@ import { useState, useRef } from 'react';
 import {
   Layout, Card, Form, Input, InputNumber, DatePicker, Button,
   Row, Col, Typography, Space, Table, Tag, Statistic, Divider,
-  message, Progress, Alert, Collapse,
+  message, Progress, Alert, Collapse, Steps, Spin,
 } from 'antd';
 import {
   ArrowLeftOutlined, DollarOutlined, InfoCircleOutlined,
   LineChartOutlined, StopOutlined, SearchOutlined,
+  LoadingOutlined, CheckCircleOutlined,
 } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import dayjs from 'dayjs';
@@ -37,6 +38,8 @@ export default function USLeaps() {
   const abortRef = useRef(null);
   const [liveScan, setLiveScan] = useState(null);
   const [liveLoading, setLiveLoading] = useState(false);
+  const [liveStep, setLiveStep] = useState(null);
+  const liveAbortRef = useRef(null);
 
   const handleStop = () => {
     if (abortRef.current) { abortRef.current.abort(); abortRef.current = null; }
@@ -45,29 +48,51 @@ export default function USLeaps() {
     message.info('已取消回测');
   };
 
-  const handleLiveScan = async () => {
+  const handleLiveScan = () => {
     const values = form.getFieldsValue();
     setLiveLoading(true);
     setLiveScan(null);
-    try {
-      const data = await usLeapsService.liveScan({
-        ticker: (values.ticker || 'AAPL').toUpperCase(),
-        max_annual_tv_pct: values.max_annual_tv_pct || 10,
-        min_expiry_months: values.min_expiry_months || 12,
-        num_strikes: values.num_strikes || 15,
-      });
-      setLiveScan(data);
-    } catch (e) {
-      message.error('实时扫描失败: ' + e.message);
-    } finally {
-      setLiveLoading(false);
-    }
+    setLiveStep(null);
+    const params = {
+      ticker: (values.ticker || 'AAPL').toUpperCase(),
+      max_annual_tv_pct: values.max_annual_tv_pct || 10,
+      min_expiry_months: values.min_expiry_months || 12,
+      num_strikes: values.num_strikes || 15,
+    };
+    liveAbortRef.current = usLeapsService.liveScanStream(
+      params,
+      (stepMsg) => setLiveStep(stepMsg),
+      (data) => {
+        setLiveScan(data);
+        setLiveLoading(false);
+        setLiveStep(null);
+        liveAbortRef.current = null;
+        if (data.error) {
+          message.warning(data.error);
+        } else {
+          message.success('实时扫描完成');
+        }
+      },
+      (errMsg) => {
+        setLiveLoading(false);
+        setLiveStep(null);
+        liveAbortRef.current = null;
+        message.error('实时扫描失败: ' + errMsg);
+      },
+    );
+  };
+
+  const handleStopLive = () => {
+    if (liveAbortRef.current) { liveAbortRef.current.abort(); liveAbortRef.current = null; }
+    setLiveLoading(false);
+    setLiveStep(null);
+    message.info('已取消扫描');
   };
 
   const handleRun = async (values) => {
     setLoading(true);
     setResult(null);
-    setStreamProgress(null);
+    setStreamProgress({ status: '正在连接服务器...', pct: 0 });
     const params = {
       ticker: values.ticker.toUpperCase(),
       start_date: values.start_date.format('YYYY-MM-DD'),
@@ -90,7 +115,7 @@ export default function USLeaps() {
           setLoading(false);
           setStreamProgress(null);
           abortRef.current = null;
-          message.success('美股LEAPS回测完成');
+          message.success(`${params.ticker} LEAPS回测完成`);
         },
         (errMsg) => {
           setLoading(false);
@@ -101,6 +126,7 @@ export default function USLeaps() {
       );
     } catch (error) {
       setLoading(false);
+      setStreamProgress(null);
       message.error('启动回测失败');
     }
   };
@@ -156,7 +182,6 @@ export default function USLeaps() {
     { title: '备注', dataIndex: 'note', key: 'note', ellipsis: true },
   ];
 
-  // Simpler scan cols for backtest (no bid/ask/volume/oi)
   const btScanCols = scanCols.filter(c => !['bid', 'ask', 'volume', 'open_interest'].includes(c.dataIndex));
 
   return (
@@ -185,7 +210,7 @@ export default function USLeaps() {
                 </p>
                 <p style={{ margin: '4px 0' }}>
                   美股期权合约乘数固定为 100（1张合约 = 100股）。
-                  LEAPS 通常为1月到期的长期期权。
+                  LEAPS 通常为1月到期的长期期权。资金不足时自动减少合约数。
                 </p>
               </div>
             }
@@ -313,15 +338,47 @@ export default function USLeaps() {
             </Form>
           </Card>
 
+          {/* 回测进度 */}
           {loading && streamProgress && (
-            <Card style={{ marginTop: 16 }}>
+            <Card style={{ marginTop: 16, borderColor: '#52c41a' }}>
               <Space direction="vertical" style={{ width: '100%' }}>
-                <Text>{streamProgress.status || '计算中'}...</Text>
-                <Progress percent={streamProgress.pct || 0} status="active" />
-                <Text type="secondary">
-                  第 {streamProgress.day || 0} / {streamProgress.total || '?'} 天
-                  {streamProgress.date && ` — ${streamProgress.date}`}
-                </Text>
+                <Space>
+                  <Spin indicator={<LoadingOutlined style={{ fontSize: 18, color: '#52c41a' }} spin />} />
+                  <Text strong style={{ color: '#52c41a', fontSize: 15 }}>
+                    {streamProgress.status || '计算中...'}
+                  </Text>
+                </Space>
+                <Progress
+                  percent={streamProgress.pct || 0}
+                  status="active"
+                  strokeColor={{ '0%': '#52c41a', '100%': '#389e0d' }}
+                  format={(pct) => `${pct}%`}
+                />
+                <Row gutter={16}>
+                  <Col span={8}>
+                    <Text type="secondary">
+                      观察日: {streamProgress.day || 0} / {streamProgress.total || '?'}
+                    </Text>
+                  </Col>
+                  <Col span={8}>
+                    <Text type="secondary">
+                      {streamProgress.date && `当前日期: ${streamProgress.date}`}
+                    </Text>
+                  </Col>
+                  <Col span={8} style={{ textAlign: 'right' }}>
+                    <Text type="secondary">
+                      {streamProgress.pct > 0 && streamProgress.pct < 100 && '预计即将完成'}
+                    </Text>
+                  </Col>
+                </Row>
+              </Space>
+            </Card>
+          )}
+          {loading && !streamProgress && (
+            <Card style={{ marginTop: 16 }}>
+              <Space>
+                <Spin indicator={<LoadingOutlined style={{ fontSize: 18 }} spin />} />
+                <Text>正在连接服务器...</Text>
               </Space>
             </Card>
           )}
@@ -330,8 +387,10 @@ export default function USLeaps() {
             <>
               <Card title={
                 <Space>
+                  <CheckCircleOutlined style={{ color: '#52c41a' }} />
                   回测摘要 — {result.summary?.ticker}
                   <Tag color="orange">BS模型 (IV={result.summary?.default_iv})</Tag>
+                  <Tag color="blue">{result.summary?.backtest_days}天</Tag>
                 </Space>
               } style={{ marginTop: 16 }}>
                 <Row gutter={[24, 16]}>
@@ -431,7 +490,7 @@ export default function USLeaps() {
                           <Text>spot=${log.spot?.toLocaleString()}</Text>
                           <Text type="secondary">expiry={log.expiry}</Text>
                           {log.selected_strike && <Tag color="green">K=${log.selected_strike}</Tag>}
-                          {!log.selected_strike && <Tag color="orange">{log.result}</Tag>}
+                          <Tag color={log.result?.includes('开仓') ? 'green' : 'orange'}>{log.result}</Tag>
                         </Space>
                       }>
                         <Table
@@ -453,17 +512,43 @@ export default function USLeaps() {
             <Space>
               <DollarOutlined style={{ color: '#52c41a' }} />
               <span>实时市场扫描 (yfinance)</span>
-              <Button type="primary" size="small" loading={liveLoading}
-                onClick={handleLiveScan}
-                style={{ background: '#52c41a', borderColor: '#52c41a' }}>
-                扫描当前市场
-              </Button>
+              {!liveLoading ? (
+                <Button type="primary" size="small"
+                  onClick={handleLiveScan}
+                  style={{ background: '#52c41a', borderColor: '#52c41a' }}>
+                  扫描当前市场
+                </Button>
+              ) : (
+                <Button danger size="small" onClick={handleStopLive}>
+                  取消扫描
+                </Button>
+              )}
             </Space>
           } style={{ marginTop: 16 }}>
             {!liveScan && !liveLoading && (
               <Text type="secondary">点击"扫描当前市场"获取实时期权数据和推荐合约</Text>
             )}
-            {liveLoading && <Text>正在通过 yfinance 获取实时数据...</Text>}
+            {liveLoading && (
+              <div style={{ padding: '16px 0' }}>
+                <Steps
+                  current={liveStep ? liveStep.step - 1 : 0}
+                  size="small"
+                  items={[
+                    { title: '获取价格', description: liveStep?.step === 1 ? liveStep.message : (liveStep?.step > 1 ? '完成' : '等待中') },
+                    { title: '查询到期日', description: liveStep?.step === 2 ? liveStep.message : (liveStep?.step > 2 ? '完成' : '等待中') },
+                    { title: '获取期权链', description: liveStep?.step === 3 ? liveStep.message : (liveStep?.step > 3 ? '完成' : '等待中') },
+                    { title: '扫描合约', description: liveStep?.step === 4 ? liveStep.message : (liveStep?.step > 4 ? '完成' : '等待中') },
+                    { title: '分析完成', description: liveStep?.step === 5 ? liveStep.message : '等待中' },
+                  ]}
+                />
+                <div style={{ textAlign: 'center', marginTop: 12 }}>
+                  <Spin indicator={<LoadingOutlined style={{ fontSize: 20, color: '#52c41a' }} spin />} />
+                  <Text style={{ marginLeft: 8, color: '#52c41a' }}>
+                    {liveStep?.message || '正在连接...'}
+                  </Text>
+                </div>
+              </div>
+            )}
             {liveScan && liveScan.error && <Alert type="warning" message={liveScan.error} />}
             {liveScan && !liveScan.error && (
               <div>

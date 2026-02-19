@@ -552,7 +552,9 @@ async def us_leaps_stream(req: BacktestRequest):
     )
 
     async def event_generator():
-        # Fetch historical prices via yfinance (sync, run in thread)
+        # Step 1: Fetch historical prices
+        yield f"data: {json.dumps({'type': 'progress', 'day': 0, 'total': 1, 'date': req.start_date.isoformat(), 'pct': 0, 'status': f'正在从yfinance获取{req.ticker}历史价格...'})}\n\n"
+
         try:
             price_map = await asyncio.get_event_loop().run_in_executor(
                 None, _get_historical_prices, req.ticker, req.start_date, req.end_date)
@@ -565,7 +567,9 @@ async def us_leaps_stream(req: BacktestRequest):
             return
 
         total = len(price_map)
-        yield f"data: {json.dumps({'type': 'progress', 'day': 0, 'total': total, 'date': req.start_date.isoformat(), 'pct': 0})}\n\n"
+        dates_sorted = sorted(price_map.keys())
+        price_range = f"${min(price_map.values()):.2f} - ${max(price_map.values()):.2f}"
+        yield f"data: {json.dumps({'type': 'progress', 'day': 0, 'total': total, 'date': req.start_date.isoformat(), 'pct': 0, 'status': f'获取到{total}天价格数据({price_range}), 开始回测...'})}\n\n"
 
         progress_queue = asyncio.Queue()
 
@@ -619,43 +623,69 @@ class LiveScanRequest(BaseModel):
 
 @router.post("/live-scan")
 async def us_leaps_live_scan(req: LiveScanRequest):
-    """Scan current market for the best US LEAPS contract using yfinance real data."""
+    """Scan current market for the best US LEAPS contract using yfinance real data.
+    Returns SSE stream with step-by-step progress."""
 
-    def _do_scan():
-        spot = _get_spot_price(req.ticker)
+    async def event_generator():
+        # Step 1: Get spot price
+        yield f"data: {json.dumps({'type': 'step', 'step': 1, 'total_steps': 5, 'message': f'获取{req.ticker}当前价格...'})}\n\n"
+
+        try:
+            spot = await asyncio.get_event_loop().run_in_executor(
+                None, _get_spot_price, req.ticker)
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'获取{req.ticker}价格失败: {str(e)}'})}\n\n"
+            return
+
         if spot <= 0:
-            return {"error": f"无法获取{req.ticker}价格"}
+            yield f"data: {json.dumps({'type': 'error', 'message': f'无法获取{req.ticker}价格'})}\n\n"
+            return
 
-        # Find LEAPS expiries
-        leaps_expiries = _find_leaps_expiries(req.ticker, req.min_expiry_months)
-        all_expiries = _get_available_expiries(req.ticker)
+        yield f"data: {json.dumps({'type': 'step', 'step': 2, 'total_steps': 5, 'message': f'{req.ticker}现价 ${spot:.2f}, 获取可用到期日...'})}\n\n"
+
+        # Step 2: Get expiries
+        try:
+            def _get_expiries():
+                leaps = _find_leaps_expiries(req.ticker, req.min_expiry_months)
+                all_exp = _get_available_expiries(req.ticker)
+                return leaps, all_exp
+            leaps_expiries, all_expiries = await asyncio.get_event_loop().run_in_executor(
+                None, _get_expiries)
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'获取到期日失败: {str(e)}'})}\n\n"
+            return
 
         if not leaps_expiries:
-            return {
-                "error": "无可用LEAPS到期日",
-                "spot": float(round(spot, 2)),
-                "ticker": req.ticker,
-                "date": date.today().isoformat(),
-                "all_expiries": all_expiries,
-            }
+            yield f"data: {json.dumps({'type': 'result', 'data': {'error': '无可用LEAPS到期日', 'spot': float(round(spot, 2)), 'ticker': req.ticker, 'date': date.today().isoformat(), 'all_expiries': all_expiries}})}\n\n"
+            yield "data: {\"type\": \"done\"}\n\n"
+            return
 
-        # Scan the nearest LEAPS expiry
+        yield f"data: {json.dumps({'type': 'step', 'step': 3, 'total_steps': 5, 'message': f'找到{len(leaps_expiries)}个LEAPS到期日, 获取{leaps_expiries[0]}期权链...'})}\n\n"
+
+        # Step 3: Get option chain for first expiry
         expiry_str = leaps_expiries[0]
         expiry_date = date.fromisoformat(expiry_str)
-        calls_df, _ = _get_option_chain(req.ticker, expiry_str)
+
+        try:
+            calls_df, _ = await asyncio.get_event_loop().run_in_executor(
+                None, _get_option_chain, req.ticker, expiry_str)
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'获取期权链失败: {str(e)}'})}\n\n"
+            return
 
         if calls_df is None or calls_df.empty:
-            return {"error": f"无法获取{expiry_str}期权链"}
+            yield f"data: {json.dumps({'type': 'error', 'message': f'无法获取{expiry_str}期权链'})}\n\n"
+            return
 
         days_to_exp = max((expiry_date - date.today()).days, 1)
         step = _us_strike_step(spot)
         atm = _nearest_strike(spot, step)
 
-        # Filter to ITM calls (strike <= spot), from ATM downward
+        yield f"data: {json.dumps({'type': 'step', 'step': 4, 'total_steps': 5, 'message': f'扫描{len(calls_df)}个合约, ATM={atm}, 步长={step}...'})}\n\n"
+
+        # Step 4: Scan strikes
         scanned = []
         best = None
-
-        # Generate strike candidates from ATM downward
         strike_candidates = []
         for i in range(req.num_strikes + 1):
             s = atm - i * step
@@ -665,7 +695,6 @@ async def us_leaps_live_scan(req: LiveScanRequest):
         for strike in strike_candidates:
             row = calls_df[abs(calls_df["strike"] - strike) < 0.01]
             if row.empty:
-                # Try nearest available strike
                 closest_idx = (calls_df["strike"] - strike).abs().idxmin()
                 row = calls_df.loc[[closest_idx]]
                 if abs(row.iloc[0]["strike"] - strike) > step * 0.6:
@@ -681,7 +710,6 @@ async def us_leaps_live_scan(req: LiveScanRequest):
 
             r = row.iloc[0]
             actual_strike = float(r["strike"])
-            # Use mid price if available, else lastPrice
             bid = _safe_float(r.get("bid", 0))
             ask = _safe_float(r.get("ask", 0))
             price = (bid + ask) / 2 if bid > 0 and ask > 0 else _safe_float(r.get("lastPrice", 0))
@@ -752,12 +780,19 @@ async def us_leaps_live_scan(req: LiveScanRequest):
                     s["selected"] = True
                     s["note"] = "✓ 推荐持仓" + ("(回退)" if fallback_used else "")
 
-        # Also scan second LEAPS expiry if available
+        # Step 5: Scan second expiry
         scanned2 = []
         expiry2_str = None
         if len(leaps_expiries) > 1:
             expiry2_str = leaps_expiries[1]
-            calls2, _ = _get_option_chain(req.ticker, expiry2_str)
+            yield f"data: {json.dumps({'type': 'step', 'step': 5, 'total_steps': 5, 'message': f'扫描第二个到期日 {expiry2_str}...'})}\n\n"
+
+            try:
+                calls2, _ = await asyncio.get_event_loop().run_in_executor(
+                    None, _get_option_chain, req.ticker, expiry2_str)
+            except Exception:
+                calls2 = None
+
             if calls2 is not None and not calls2.empty:
                 exp2_date = date.fromisoformat(expiry2_str)
                 days2 = max((exp2_date - date.today()).days, 1)
@@ -788,8 +823,10 @@ async def us_leaps_live_scan(req: LiveScanRequest):
                         "selected": False,
                         "note": "满足阈值" if atv2 < req.max_annual_tv_pct else f"TV%={atv2:.2f}%",
                     })
+        else:
+            yield f"data: {json.dumps({'type': 'step', 'step': 5, 'total_steps': 5, 'message': '分析完成'})}\n\n"
 
-        return {
+        result = {
             "date": date.today().isoformat(),
             "ticker": req.ticker,
             "spot": float(round(spot, 2)),
@@ -805,8 +842,7 @@ async def us_leaps_live_scan(req: LiveScanRequest):
             "fallback_used": fallback_used,
         }
 
-    try:
-        result = await asyncio.get_event_loop().run_in_executor(None, _do_scan)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"扫描失败: {str(e)}")
+        yield f"data: {json.dumps({'type': 'result', 'data': result})}\n\n"
+        yield "data: {\"type\": \"done\"}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

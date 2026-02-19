@@ -38,13 +38,37 @@ export const usLeapsService = {
     return controller;
   },
 
-  async liveScan(params) {
-    const resp = await fetch(`${API_BASE_URL}/api/us-leaps/live-scan`, {
+  liveScanStream(params, onStep, onResult, onError) {
+    const controller = new AbortController();
+    fetch(`${API_BASE_URL}/api/us-leaps/live-scan`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
+      signal: controller.signal,
+    }).then(async (response) => {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const msg = JSON.parse(line.slice(6));
+              if (msg.type === 'step') onStep(msg);
+              else if (msg.type === 'result') onResult(msg.data);
+              else if (msg.type === 'error') onError(msg.message);
+            } catch (e) { /* ignore */ }
+          }
+        }
+      }
+    }).catch((err) => {
+      if (err.name !== 'AbortError') onError(err.message);
     });
-    if (!resp.ok) throw new Error(`Live scan failed: ${resp.status}`);
-    return resp.json();
+    return controller;
   },
 };
