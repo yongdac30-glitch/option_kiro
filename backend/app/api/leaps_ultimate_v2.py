@@ -210,12 +210,18 @@ async def run_leaps_v2(
             # Get current position's remaining time value
             cur_price, cur_src, cur_iv = await _get_price(
                 cur_expiry, cur_strike, spot, today)
+
+            # Guard: if current price is bad, skip roll check
+            if cur_price <= 0:
+                return None, []
+
             cur_intrinsic = max(0.0, spot - cur_strike)
             cur_tv = max(0.0, cur_price - cur_intrinsic)
 
             available = get_available_expiries_at_date(today)
-            # Only consider expiries further than current
-            further_expiries = [e for e in available if e > cur_expiry]
+            # Only consider expiries further than current, with at least 30 days extension
+            further_expiries = [e for e in available
+                                if e > cur_expiry and (e - cur_expiry).days >= 30]
             further_expiries.sort(reverse=True)  # furthest first
 
             step = get_strike_step(underlying, spot)
@@ -242,7 +248,8 @@ async def run_leaps_v2(
                             "strike": float(far_strike), "instrument": instrument,
                             "expiry": far_expiry.isoformat(),
                             "price": 0, "far_tv": 0, "cur_tv": float(round(cur_tv, 2)),
-                            "annual_roll_cost": None, "selected": False, "note": "无数据",
+                            "tv_diff": 0, "annual_roll_cost": None,
+                            "selected": False, "note": "无数据",
                         })
                         continue
 
