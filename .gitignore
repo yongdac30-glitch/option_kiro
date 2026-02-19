@@ -1,0 +1,16 @@
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+backend/venv/
+backend/.env
+backend/*.db
+
+# Node
+frontend/node_modules/
+frontend/.env
+
+# IDE
+.vscode/

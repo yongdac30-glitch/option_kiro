@@ -1,0 +1,17 @@
+{
+  "enabled": true,
+  "name": "更新策略文档中心",
+  "description": "当真实数据回测页面或后端回测逻辑文件被修改时，检查是否有新增策略，如果有则自动在RealBacktest.jsx的策略文档中心（Collapse组件）中添加对应的策略说明文档。",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "frontend/src/components/RealBacktest.jsx",
+      "backend/app/api/deribit.py"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "检查 frontend/src/components/RealBacktest.jsx 中的策略文档中心（Collapse组件的items数组）是否包含了所有策略的文档说明。对比Tabs中的策略选项卡列表和文档中心的Collapse items，如果发现有新增的策略选项卡但文档中心缺少对应的说明，请自动在Collapse的items数组中添加该策略的详细文档，包括：策略原理、参数说明、回测逻辑、适用场景。文档语言为中文。"
+  }
+}

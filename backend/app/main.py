@@ -1,0 +1,63 @@
+"""FastAPI application entry point."""
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from app.core.config import settings
+from app.core.database import init_db
+from app.api import positions, market_prices, volatility, pnl, portfolio, iv, hedge, okx, backtest, deribit, deribit_debug, okx_xau, leaps, leaps_ultimate, leaps_ultimate_v2
+from app.models import DeribitPriceCache, DeribitIVCache, OkxXauTick  # ensure tables are registered
+
+# Create FastAPI application
+app = FastAPI(
+    title="Options Risk Monitor API",
+    description="API for monitoring options portfolio risk",
+    version="1.0.0"
+)
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins for development
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
+
+# Register routers
+app.include_router(portfolio.router)
+app.include_router(positions.router)
+app.include_router(market_prices.router)
+app.include_router(volatility.router)
+app.include_router(pnl.router)
+app.include_router(iv.router)
+app.include_router(hedge.router)
+app.include_router(okx.router)
+app.include_router(backtest.router)
+app.include_router(deribit.router)
+app.include_router(deribit_debug.router)
+app.include_router(okx_xau.router)
+app.include_router(leaps.router)
+app.include_router(leaps_ultimate.router)
+app.include_router(leaps_ultimate_v2.router)
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database on startup."""
+    init_db()
+
+
+@app.get("/")
+async def root():
+    """Root endpoint."""
+    return {
+        "message": "Options Risk Monitor API",
+        "version": "1.0.0",
+        "status": "running"
+    }
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    return {"status": "healthy"}

@@ -1,0 +1,30 @@
+# Python dependencies for Options Risk Monitor Backend
+
+# Web Framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
+
+# Database
+sqlalchemy>=2.0.25
+alembic>=1.13.1
+
+# Data Validation
+pydantic>=2.5.3
+pydantic-settings>=2.1.0
+
+# Scientific Computing
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Testing
+pytest>=7.4.4
+pytest-asyncio>=0.23.3
+httpx>=0.26.0
+hypothesis>=6.98.3
+
+# WebSocket
+websockets>=12.0
+
+# Environment Variables
+python-dotenv>=1.0.0
