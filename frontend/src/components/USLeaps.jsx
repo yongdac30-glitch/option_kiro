@@ -21,6 +21,7 @@ import {
   Legend, ResponsiveContainer, Area, ComposedChart, Line, ReferenceLine,
 } from 'recharts';
 import { usLeapsService } from '../services/usLeapsService';
+import LeapsRollDoc from './LeapsRollDoc';
 
 const { Header: AntHeader, Content, Footer } = Layout;
 const { Title, Text } = Typography;
@@ -217,6 +218,8 @@ export default function USLeaps() {
               </div>
             }
           />
+
+          <LeapsRollDoc />
 
           <Card title="策略参数">
             <Form form={form} layout="vertical" onFinish={handleRun}
