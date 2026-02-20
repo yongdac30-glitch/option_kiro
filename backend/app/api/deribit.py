@@ -24,6 +24,7 @@ router = APIRouter(prefix="/api/deribit", tags=["deribit"])
 DERIBIT_BASE = "https://www.deribit.com/api/v2"
 RATE_DELAY = 0.3
 RISK_FREE_RATE = 0.05
+MAX_RETRY = 3  # max retries before marking as no-data
 
 
 # ── Pydantic Models ─────────────────────────────────────────────────────────
@@ -320,16 +321,18 @@ def save_cached_iv_smile(
 # ── Deribit API fetchers ────────────────────────────────────────────────────
 
 async def fetch_deribit_index_prices(
-    underlying: str, start_date: date, end_date: date
+    underlying: str, start_date: date, end_date: date,
+    force: bool = False,
 ) -> Dict[date, float]:
     """Fetch daily index prices, using DB cache first."""
     # 1) Check cache
-    cached = get_cached_prices(underlying, start_date, end_date)
-    expected_days = (end_date - start_date).days
-    # If cache covers most of the range, use it
-    if len(cached) >= expected_days * 0.8:
-        print(f"[Deribit] Using {len(cached)} cached prices for {underlying}")
-        return cached
+    if not force:
+        cached = get_cached_prices(underlying, start_date, end_date)
+        expected_days = (end_date - start_date).days
+        # If cache covers most of the range, use it
+        if len(cached) >= expected_days * 0.8:
+            print(f"[Deribit] Using {len(cached)} cached prices for {underlying}")
+            return cached
 
     # 2) Fetch from API
     instrument = f"{underlying}-PERPETUAL"
@@ -681,8 +684,48 @@ async def fetch_iv_smile(
     if db_points:
         save_cached_iv_smile(underlying, expiry, option_type, target_date, spot, db_points)
     else:
-        print(f"[Deribit] No IV data found for {underlying} {option_type} expiry={expiry} date={target_date} — caching NO_DATA sentinel")
-        save_no_data_sentinel(underlying, expiry, option_type, target_date, spot)
+        # Retry up to 3 times before marking as no-data
+        # Check if we already have a retry count in the collection log
+        from app.core.database import SessionLocal as _SL
+        from app.models.data_collection import DataCollectionLog
+        _db = _SL()
+        try:
+            log = _db.query(DataCollectionLog).filter(
+                DataCollectionLog.source == "deribit",
+                DataCollectionLog.data_type == "iv_smile",
+                DataCollectionLog.underlying == underlying,
+                DataCollectionLog.target_date == target_date,
+                DataCollectionLog.expiry_date == expiry,
+                DataCollectionLog.option_type == option_type,
+            ).first()
+            if log is None:
+                log = DataCollectionLog(
+                    source="deribit", data_type="iv_smile",
+                    underlying=underlying, target_date=target_date,
+                    expiry_date=expiry, option_type=option_type,
+                    status="no_data", retry_count=1,
+                    no_data_confirmed=False,
+                )
+                _db.add(log)
+                _db.commit()
+                print(f"[Deribit] No IV data (attempt 1/3) for {underlying} {option_type} expiry={expiry} date={target_date}")
+            else:
+                log.retry_count = (log.retry_count or 0) + 1
+                if log.retry_count >= MAX_RETRY:
+                    log.no_data_confirmed = True
+                    log.status = "no_data"
+                    # Save sentinel so we never re-fetch
+                    save_no_data_sentinel(underlying, expiry, option_type, target_date, spot)
+                    print(f"[Deribit] No IV data (attempt {log.retry_count}/{MAX_RETRY}) — CONFIRMED no data, sentinel saved")
+                else:
+                    print(f"[Deribit] No IV data (attempt {log.retry_count}/{MAX_RETRY}) for {underlying} {option_type} expiry={expiry} date={target_date}")
+                _db.commit()
+        except Exception as e:
+            print(f"[Deribit] Error updating collection log: {e}")
+            # Fallback: save sentinel immediately to avoid infinite retries
+            save_no_data_sentinel(underlying, expiry, option_type, target_date, spot)
+        finally:
+            _db.close()
 
     return smile_points
 
@@ -749,8 +792,9 @@ async def _fetch_single_strike_price_fast(
 ) -> Tuple[float, str, Optional[float], List[Tuple[float, float]]]:
     """Get option price for a single strike with minimal API calls.
 
-    Optimized for the LEAPS strike scan: instead of fetching a full 14-strike
-    IV smile for each candidate, this does at most 2 API calls per strike.
+    Optimized for the LEAPS strike scan: first checks DB cache, then
+    fetches a full IV smile (which caches all strikes at once), then
+    falls back to direct chart/trade API, then BS model.
 
     Returns (price_usd, data_source, iv_used, smile_points).
     smile_points is empty since we don't build a full smile.
@@ -784,7 +828,21 @@ async def _fetch_single_strike_price_fast(
         price = black_scholes_price(spot, strike, T, RISK_FREE_RATE, default_iv, option_type)
         return float(price), "model", float(default_iv), []
 
-    # 3) Try chart data for just this one strike (1 API call)
+    # 3) Fetch full IV smile for this expiry/date combo — caches all strikes at once
+    #    so subsequent calls for other strikes on the same expiry/date hit cache
+    try:
+        smile = await fetch_iv_smile(
+            client, underlying, expiry, spot, option_type, target_date, num_strikes=7)
+        if smile:
+            # Now re-check cache (fetch_iv_smile saved data to DB)
+            iv_interp = interpolate_iv_at_strike(smile, strike)
+            if iv_interp and 0.01 < iv_interp < 10.0:
+                price = black_scholes_price(spot, strike, T, RISK_FREE_RATE, iv_interp, option_type)
+                return float(price), "iv_smile", float(iv_interp), []
+    except Exception as e:
+        print(f"[LEAPS Fast] IV smile fetch error: {e}")
+
+    # 4) Try chart data for just this one strike (1 API call)
     instrument = build_instrument_name(underlying, expiry, strike, option_type)
     days_from_now = (date.today() - target_date).days
     window_days = 10 if days_from_now > 365 else (7 if days_from_now > 180 else 5)

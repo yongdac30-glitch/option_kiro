@@ -175,7 +175,18 @@ class BacktestResult(BaseModel):
 # ── OKX price fetcher ────────────────────────────────────────────────
 
 async def fetch_okx_prices(underlying: str, start_date: date, end_date: date) -> Dict[date, float]:
-    """Fetch daily prices from OKX."""
+    """Fetch daily prices from OKX, using DB cache first."""
+    # Try DB cache first
+    try:
+        from app.api.data_center import get_okx_cached_prices
+        cached = get_okx_cached_prices(underlying, start_date, end_date)
+        if cached and len(cached) >= (end_date - start_date).days * 0.8:
+            print(f"[OKX] Using {len(cached)} cached prices for {underlying}")
+            return cached
+    except Exception:
+        pass
+
+    # Fetch from API
     inst_id = f"{underlying}-USD"
     all_candles = {}
     end_ts = int(datetime.combine(end_date + timedelta(days=1), datetime.min.time(),
@@ -206,6 +217,14 @@ async def fetch_okx_prices(underlying: str, start_date: date, end_date: date) ->
                 break
             current_after = oldest_ts
             await asyncio.sleep(0.25)
+
+    # Save to OKX cache for future use
+    try:
+        from app.api.data_center import _fetch_okx_prices_with_cache
+        await _fetch_okx_prices_with_cache(underlying, start_date, end_date)
+    except Exception:
+        pass
+
     return all_candles
 
 

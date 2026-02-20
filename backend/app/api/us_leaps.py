@@ -19,9 +19,32 @@ import asyncio
 import json
 import math
 
+import time
+
 import yfinance as yf
 
 from app.services.pricing import black_scholes_price, calculate_time_to_expiration
+
+# ── Retry helper for yfinance rate limits ────────────────────────────
+MAX_RETRIES = 3
+RETRY_DELAYS = [5, 15, 30]  # seconds
+
+
+def _retry_on_rate_limit(fn, *args, retries=MAX_RETRIES):
+    """Call fn(*args), retry with backoff on rate-limit / connection errors."""
+    for attempt in range(retries + 1):
+        try:
+            return fn(*args)
+        except Exception as e:
+            msg = str(e).lower()
+            is_rate_limit = "rate" in msg or "too many" in msg or "429" in msg
+            is_transient = "connection" in msg or "timeout" in msg or "reset" in msg
+            if (is_rate_limit or is_transient) and attempt < retries:
+                delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
+                print(f"[yfinance] {e} — retry {attempt+1}/{retries} in {delay}s")
+                time.sleep(delay)
+                continue
+            raise
 
 router = APIRouter(prefix="/api/us-leaps", tags=["us-leaps"])
 
@@ -59,41 +82,53 @@ def _safe_int(val, default=0):
 # ── yfinance helpers ─────────────────────────────────────────────────
 
 def _get_spot_price(ticker_symbol: str) -> float:
-    """Get current spot price via yfinance."""
-    t = yf.Ticker(ticker_symbol)
-    info = t.fast_info
-    price = _safe_float(info.get("lastPrice", 0)) or _safe_float(info.get("previousClose", 0))
-    return price
+    """Get current spot price via yfinance (with retry)."""
+    def _fetch():
+        t = yf.Ticker(ticker_symbol)
+        info = t.fast_info
+        price = _safe_float(info.get("lastPrice", 0)) or _safe_float(info.get("previousClose", 0))
+        if price <= 0:
+            raise ValueError(f"No price data for {ticker_symbol}")
+        return price
+    return _retry_on_rate_limit(_fetch)
 
 
 def _get_historical_prices(ticker_symbol: str, start: date, end: date) -> Dict[date, float]:
-    """Get historical daily close prices via yfinance."""
-    t = yf.Ticker(ticker_symbol)
-    df = t.history(start=start.isoformat(), end=(end + timedelta(days=1)).isoformat(),
-                   interval="1d")
-    prices = {}
-    for idx, row in df.iterrows():
-        d = idx.date() if hasattr(idx, 'date') else idx
-        prices[d] = float(row["Close"])
-    return prices
+    """Get historical daily close prices via yfinance (with retry)."""
+    def _fetch():
+        t = yf.Ticker(ticker_symbol)
+        df = t.history(start=start.isoformat(), end=(end + timedelta(days=1)).isoformat(),
+                       interval="1d")
+        if df.empty:
+            raise ValueError(f"No historical data for {ticker_symbol}")
+        prices = {}
+        for idx, row in df.iterrows():
+            d = idx.date() if hasattr(idx, 'date') else idx
+            prices[d] = float(row["Close"])
+        return prices
+    return _retry_on_rate_limit(_fetch)
 
 
 def _get_option_chain(ticker_symbol: str, expiry_str: str):
-    """Get option chain for a specific expiry date.
+    """Get option chain for a specific expiry date (with retry).
     Returns (calls_df, puts_df) or (None, None) if not available."""
-    try:
+    def _fetch():
         t = yf.Ticker(ticker_symbol)
         chain = t.option_chain(expiry_str)
         return chain.calls, chain.puts
+    try:
+        return _retry_on_rate_limit(_fetch)
     except Exception:
         return None, None
 
 
 def _get_available_expiries(ticker_symbol: str) -> List[str]:
-    """Get all available option expiry dates."""
-    try:
+    """Get all available option expiry dates (with retry)."""
+    def _fetch():
         t = yf.Ticker(ticker_symbol)
         return list(t.options)
+    try:
+        return _retry_on_rate_limit(_fetch)
     except Exception:
         return []
 
@@ -732,7 +767,7 @@ async def us_leaps_stream(req: BacktestRequest):
 
     async def event_generator():
         # Step 1: Fetch historical prices
-        yield f"data: {json.dumps({'type': 'progress', 'day': 0, 'total': 1, 'date': req.start_date.isoformat(), 'pct': 0, 'status': f'正在从yfinance获取{req.ticker}历史价格...'})}\n\n"
+        yield f"data: {json.dumps({'type': 'progress', 'day': 0, 'total': 1, 'date': req.start_date.isoformat(), 'pct': 0, 'status': f'正在从yfinance获取{req.ticker}历史价格(如遇限流会自动重试)...'})}\n\n"
 
         try:
             price_map = await asyncio.get_event_loop().run_in_executor(

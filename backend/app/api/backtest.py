@@ -319,9 +319,18 @@ async def run_backtest_api(request: BacktestRequest):
     if not request.legs:
         raise HTTPException(status_code=400, detail="至少需要一个策略腿")
 
-    # Fetch historical prices
+    # Fetch historical prices — try DB cache first, then API
     try:
-        prices = await fetch_daily_prices(request.underlying, request.start_date, request.end_date)
+        from app.api.data_center import get_okx_cached_prices
+        cached = get_okx_cached_prices(request.underlying, request.start_date, request.end_date)
+        if cached and len(cached) >= (request.end_date - request.start_date).days * 0.8:
+            prices = [{"date": d, "close": p} for d, p in sorted(cached.items())]
+            print(f"[Backtest] Using {len(prices)} cached OKX prices")
+        else:
+            prices = await fetch_daily_prices(request.underlying, request.start_date, request.end_date)
+            # Save to OKX cache for future use
+            from app.api.data_center import _fetch_okx_prices_with_cache
+            await _fetch_okx_prices_with_cache(request.underlying, request.start_date, request.end_date)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取历史数据失败: {str(e)}")
 
