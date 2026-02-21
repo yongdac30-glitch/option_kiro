@@ -16,6 +16,7 @@ import LeapsUltimate from './components/LeapsUltimate';
 import LeapsUltimateV2 from './components/LeapsUltimateV2';
 import USLeaps from './components/USLeaps';
 import DataCenter from './components/DataCenter';
+import QQQLeaps from './components/QQQLeaps';
 import './App.css';
 
 function App() {
@@ -35,6 +36,7 @@ function App() {
             <Route path="/leaps-ultimate-v2" element={<LeapsUltimateV2 />} />
             <Route path="/us-leaps" element={<USLeaps />} />
             <Route path="/data-center" element={<DataCenter />} />
+            <Route path="/qqq-leaps" element={<QQQLeaps />} />
           </Routes>
         </BrowserRouter>
       </AppProvider>
