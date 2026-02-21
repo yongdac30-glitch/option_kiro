@@ -324,12 +324,12 @@ async def fetch_deribit_index_prices(
     underlying: str, start_date: date, end_date: date,
     force: bool = False,
 ) -> Dict[date, float]:
-    """Fetch daily index prices, using DB cache first."""
+    """Fetch daily index prices, using DB cache first.
+    Falls back to cache if API fails (network error etc)."""
     # 1) Check cache
+    cached = get_cached_prices(underlying, start_date, end_date)
     if not force:
-        cached = get_cached_prices(underlying, start_date, end_date)
         expected_days = (end_date - start_date).days
-        # If cache covers most of the range, use it
         if len(cached) >= expected_days * 0.8:
             print(f"[Deribit] Using {len(cached)} cached prices for {underlying}")
             return cached
@@ -349,10 +349,17 @@ async def fetch_deribit_index_prices(
         "resolution": "1D",
     }
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        print(f"[Deribit] API error fetching prices: {e}")
+        if cached:
+            print(f"[Deribit] Falling back to {len(cached)} cached prices")
+            return cached
+        raise
 
     result = data.get("result", {})
     ticks = result.get("ticks", [])
@@ -367,6 +374,11 @@ async def fetch_deribit_index_prices(
 
     # 3) Save to cache
     save_cached_prices(underlying, price_map)
+
+    # Merge with existing cache (API might not cover full range)
+    for d, p in cached.items():
+        if d not in price_map:
+            price_map[d] = p
 
     return price_map
 
@@ -839,6 +851,12 @@ async def _fetch_single_strike_price_fast(
             if iv_interp and 0.01 < iv_interp < 10.0:
                 price = black_scholes_price(spot, strike, T, RISK_FREE_RATE, iv_interp, option_type)
                 return float(price), "iv_smile", float(iv_interp), []
+    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+        # Network is down — skip API calls, fall back to model immediately
+        print(f"[LEAPS Fast] Network error in IV smile: {e}")
+        default_iv = 0.6
+        price = black_scholes_price(spot, strike, T, RISK_FREE_RATE, default_iv, option_type)
+        return float(price), "model", float(default_iv), []
     except Exception as e:
         print(f"[LEAPS Fast] IV smile fetch error: {e}")
 
@@ -890,6 +908,11 @@ async def _fetch_single_strike_price_fast(
                             return float(price_usd), "chart_direct", float(iv), []
                         else:
                             return float(price_usd), "chart_direct", None, []
+    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+        print(f"[LEAPS Fast] Network error for chart {instrument}: {e}")
+        default_iv = 0.6
+        price = black_scholes_price(spot, strike, T, RISK_FREE_RATE, default_iv, option_type)
+        return float(price), "model", float(default_iv), []
     except Exception as e:
         print(f"[LEAPS Fast] Chart error for {instrument}: {e}")
 
@@ -907,6 +930,8 @@ async def _fetch_single_strike_price_fast(
                     return float(price_usd), "trade_direct", float(iv), []
                 else:
                     return float(price_usd), "trade_direct", None, []
+    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+        print(f"[LEAPS Fast] Network error for trade {instrument}: {e}")
     except Exception as e:
         print(f"[LEAPS Fast] Trade error for {instrument}: {e}")
 

@@ -60,32 +60,50 @@ async def _fetch_okx_prices_with_cache(
                                      tzinfo=timezone.utc).timestamp() * 1000)
     current_after = end_ts
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
-        for _ in range(50):
-            url = f"{OKX_BASE}/api/v5/market/history-index-candles"
-            params = {"instId": inst_id, "bar": "1D", "limit": "100", "after": str(current_after)}
-            resp = await client.get(url, params=params, headers={"User-Agent": "DataCenter/1.0"})
-            if resp.status_code == 429:
-                await asyncio.sleep(1.0)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+            for _ in range(50):
+                url = f"{OKX_BASE}/api/v5/market/history-index-candles"
+                params = {"instId": inst_id, "bar": "1D", "limit": "100", "after": str(current_after)}
                 resp = await client.get(url, params=params, headers={"User-Agent": "DataCenter/1.0"})
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("code") != "0" or not data.get("data"):
-                break
-            for c in data["data"]:
-                ts = int(c[0])
-                if ts < start_ts:
-                    continue
-                dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).date()
-                all_candles[dt] = {
-                    "open": float(c[1]), "high": float(c[2]),
-                    "low": float(c[3]), "close": float(c[4]),
-                }
-            oldest_ts = int(data["data"][-1][0])
-            if oldest_ts <= start_ts:
-                break
-            current_after = oldest_ts
-            await asyncio.sleep(0.25)
+                if resp.status_code == 429:
+                    await asyncio.sleep(1.0)
+                    resp = await client.get(url, params=params, headers={"User-Agent": "DataCenter/1.0"})
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("code") != "0" or not data.get("data"):
+                    break
+                for c in data["data"]:
+                    ts = int(c[0])
+                    if ts < start_ts:
+                        continue
+                    dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).date()
+                    all_candles[dt] = {
+                        "open": float(c[1]), "high": float(c[2]),
+                        "low": float(c[3]), "close": float(c[4]),
+                    }
+                oldest_ts = int(data["data"][-1][0])
+                if oldest_ts <= start_ts:
+                    break
+                current_after = oldest_ts
+                await asyncio.sleep(0.25)
+    except Exception as e:
+        print(f"[OKX] API error fetching prices: {e}")
+        if not all_candles:
+            # Return whatever we have in cache
+            db2 = SessionLocal()
+            try:
+                rows = db2.query(OkxPriceCache).filter(
+                    OkxPriceCache.underlying == inst_id,
+                    OkxPriceCache.trade_date >= start_date,
+                    OkxPriceCache.trade_date <= end_date,
+                ).all()
+                if rows:
+                    print(f"[OKX] Falling back to {len(rows)} cached prices")
+                    return {r.trade_date: r.close_price for r in rows}
+            finally:
+                db2.close()
+            raise
 
     # Save to DB
     db = SessionLocal()
@@ -261,10 +279,17 @@ async def collect_data_stream(req: CollectRequest):
 
                     yield f"data: {json.dumps({'type': 'progress', 'pct': 22, 'message': f'开始收取IV数据: 共 {len(sorted_dates)} 天, 采样 {total_sampled} 天 (间隔 {interval} 天)'})}\n\n"
 
+                    consecutive_errors = 0
+                    MAX_CONSECUTIVE_ERRORS = 5
+
                     async with httpx.AsyncClient(
                         timeout=httpx.Timeout(30.0, connect=10.0)
                     ) as client:
                         for idx, td in enumerate(sampled_dates):
+                            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                                yield f"data: {json.dumps({'type': 'progress', 'pct': 20 + int(80 * (idx + 1) / total_sampled), 'message': f'连续 {MAX_CONSECUTIVE_ERRORS} 次网络错误, 停止IV收取 (已获取 {iv_count} 个IV点)'})}\n\n"
+                                break
+
                             spot = price_map[td]
                             if not spot or spot <= 0:
                                 continue
@@ -277,6 +302,7 @@ async def collect_data_stream(req: CollectRequest):
                                 e for e in expiries if e > td
                             )
 
+                            day_had_error = False
                             for expiry in expiries:
                                 for opt_type in ["PUT", "CALL"]:
                                     cached = get_cached_iv_smile(
@@ -297,6 +323,13 @@ async def collect_data_stream(req: CollectRequest):
                                             num_strikes=7,
                                         )
                                         iv_count += len(smile)
+                                        consecutive_errors = 0
+                                    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                                        consecutive_errors += 1
+                                        day_had_error = True
+                                        print(
+                                            f"[DataCenter] Network error ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {e}"
+                                        )
                                     except Exception as e:
                                         print(
                                             f"[DataCenter] IV error: "
