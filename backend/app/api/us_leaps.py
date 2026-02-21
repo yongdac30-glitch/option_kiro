@@ -34,6 +34,8 @@ RETRY_DELAYS = [5, 15, 30]  # seconds
 
 def _retry_on_rate_limit(fn, *args, retries=MAX_RETRIES):
     """Call fn(*args), retry with backoff on rate-limit / connection errors."""
+    from app.core.config import apply_proxy_env
+    apply_proxy_env()  # Ensure yfinance uses current proxy settings
     for attempt in range(retries + 1):
         try:
             return fn(*args)

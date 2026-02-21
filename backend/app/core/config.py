@@ -42,6 +42,8 @@ def set_proxy(enabled: bool, url: Optional[str] = None):
     _proxy_enabled = enabled
     if url:
         _proxy_url = url
+    # Also update env vars for libraries that read proxy from env (yfinance/requests)
+    apply_proxy_env()
 
 
 def get_proxy_config() -> dict:
@@ -70,3 +72,16 @@ def create_http_client(
         kwargs["proxy"] = _proxy_url
     
     return httpx.AsyncClient(**kwargs)
+
+
+def apply_proxy_env():
+    """Set HTTP_PROXY/HTTPS_PROXY env vars based on current proxy state.
+    
+    Call this before using libraries that read proxy from env (e.g. yfinance/requests).
+    """
+    if _proxy_enabled and _proxy_url:
+        os.environ["HTTP_PROXY"] = _proxy_url
+        os.environ["HTTPS_PROXY"] = _proxy_url
+    else:
+        os.environ.pop("HTTP_PROXY", None)
+        os.environ.pop("HTTPS_PROXY", None)
