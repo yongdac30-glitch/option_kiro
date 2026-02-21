@@ -6,55 +6,96 @@
 - 作为 QQQ 的杠杆替代持仓策略
 - 同时对比 Buy & Hold QQQ 的表现
 
-数据来源: yfinance (QQQ / XLK / SPY 历史价格)
+数据来源: Yahoo Finance REST API (直接调用, 绕过 yfinance 库限流)
 期权定价: Black-Scholes 模型
 """
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 import asyncio
 import json
 import math
-import time
-
-import yfinance as yf
+import httpx
 
 from app.services.pricing import black_scholes_price, calculate_time_to_expiration
+from app.core.config import create_http_client
 
 router = APIRouter(prefix="/api/qqq-leaps", tags=["qqq-leaps"])
 
 RISK_FREE_RATE = 0.045
 CONTRACT_MULT = 100
 
-# ── Retry helper ─────────────────────────────────────────────────────
-MAX_RETRIES = 3
-RETRY_DELAYS = [5, 15, 30]
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
 
-def _retry(fn, *args):
-    for attempt in range(MAX_RETRIES + 1):
+async def _fetch_yahoo_prices(ticker: str, start: date, end: date) -> Dict[date, float]:
+    """Fetch daily close prices from Yahoo Finance REST API directly.
+    This bypasses the yfinance library which is often rate-limited."""
+    start_ts = int(datetime.combine(start, datetime.min.time(),
+                                     tzinfo=timezone.utc).timestamp())
+    end_ts = int(datetime.combine(end + timedelta(days=1), datetime.min.time(),
+                                   tzinfo=timezone.utc).timestamp())
+
+    url = YAHOO_CHART_URL.format(symbol=ticker)
+    params = {
+        "period1": str(start_ts),
+        "period2": str(end_ts),
+        "interval": "1d",
+        "includePrePost": "false",
+    }
+
+    last_error = None
+    for attempt in range(3):
         try:
-            return fn(*args)
+            async with create_http_client(timeout=30.0, connect_timeout=10.0) as client:
+                resp = await client.get(url, params=params, headers=YAHOO_HEADERS)
+                if resp.status_code == 429:
+                    await asyncio.sleep(2.0 * (attempt + 1))
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
         except Exception as e:
-            msg = str(e).lower()
-            retriable = any(k in msg for k in ("rate", "429", "timeout", "connection", "reset"))
-            if retriable and attempt < MAX_RETRIES:
-                time.sleep(RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)])
+            last_error = e
+            await asyncio.sleep(2.0 * (attempt + 1))
+            continue
+
+        chart = data.get("chart", {})
+        results = chart.get("result", [])
+        if not results:
+            raise ValueError(f"Yahoo Finance 无数据: {ticker}")
+
+        result = results[0]
+        timestamps = result.get("timestamp", [])
+        indicators = result.get("indicators", {})
+        quotes = indicators.get("quote", [{}])[0]
+        closes = quotes.get("close", [])
+        # adjclose if available
+        adj_close_list = indicators.get("adjclose", [{}])
+        adj_closes = adj_close_list[0].get("adjclose", []) if adj_close_list else []
+
+        prices = {}
+        for i, ts in enumerate(timestamps):
+            if ts is None:
                 continue
-            raise
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc).date()
+            # Prefer adjusted close
+            price = None
+            if adj_closes and i < len(adj_closes) and adj_closes[i] is not None:
+                price = float(adj_closes[i])
+            elif i < len(closes) and closes[i] is not None:
+                price = float(closes[i])
+            if price and price > 0:
+                prices[dt] = round(price, 4)
 
+        if not prices:
+            raise ValueError(f"Yahoo Finance 返回空数据: {ticker}")
 
-def _get_prices(ticker: str, start: date, end: date) -> Dict[date, float]:
-    def _fetch():
-        t = yf.Ticker(ticker)
-        df = t.history(start=start.isoformat(),
-                       end=(end + timedelta(days=1)).isoformat(), interval="1d")
-        if df.empty:
-            raise ValueError(f"No data for {ticker}")
-        return {idx.date(): float(row["Close"]) for idx, row in df.iterrows()}
-    return _retry(_fetch)
+        return prices
+
+    raise ValueError(f"获取 {ticker} 数据失败(重试3次): {last_error}")
 
 
 # ── US option expiry generation ──────────────────────────────────────
@@ -460,8 +501,7 @@ async def qqq_leaps_stream(req: QQQLeapsRequest):
         yield f"data: {json.dumps({'type': 'progress', 'pct': 0, 'status': f'正在获取 {req.ticker} 历史价格...'})}\n\n"
 
         try:
-            price_map = await asyncio.get_event_loop().run_in_executor(
-                None, _get_prices, req.ticker, req.start_date, req.end_date)
+            price_map = await _fetch_yahoo_prices(req.ticker, req.start_date, req.end_date)
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': f'获取{req.ticker}价格失败: {str(e)}'})}\n\n"
             return
@@ -514,8 +554,7 @@ async def qqq_leaps_stream(req: QQQLeapsRequest):
                 continue
             yield f"data: {json.dumps({'type': 'progress', 'pct': 92, 'status': f'获取对比标的 {ct} 数据...'})}\n\n"
             try:
-                cp = await asyncio.get_event_loop().run_in_executor(
-                    None, _get_prices, ct, req.start_date, req.end_date)
+                cp = await _fetch_yahoo_prices(ct, req.start_date, req.end_date)
                 if cp:
                     sorted_dates = sorted(cp.keys())
                     first_price = cp[sorted_dates[0]]
@@ -550,8 +589,7 @@ async def etf_compare(
     results = {}
     for t in ticker_list:
         try:
-            prices = await asyncio.get_event_loop().run_in_executor(
-                None, _get_prices, t, start, end)
+            prices = await _fetch_yahoo_prices(t, start, end)
             if prices:
                 sorted_d = sorted(prices.keys())
                 first = prices[sorted_d[0]]
