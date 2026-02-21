@@ -15,31 +15,36 @@ import { Link } from 'react-router-dom';
 const { Header: AntHeader } = Layout;
 const { Title } = Typography;
 
-const linkStyle = { color: '#ffffffd9', fontSize: 13, display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0' };
+/* 下拉菜单是白色背景，文字用深色 */
+const menuLink = (to, icon, text, color) => (
+  <Link to={to} style={{ color: color || 'rgba(0,0,0,0.88)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
+    {icon} {text}
+  </Link>
+);
 
 const backtestItems = {
   items: [
-    { key: 'bt', label: <Link to="/backtest" style={linkStyle}><ExperimentOutlined /> 策略回测</Link> },
-    { key: 'rbt', label: <Link to="/real-backtest" style={linkStyle}><DatabaseOutlined /> 真实数据回测</Link> },
-    { key: 'btv', label: <Link to="/backtest-verify" style={linkStyle}><CheckCircleOutlined /> 回测验证</Link> },
+    { key: 'bt', label: menuLink('/backtest', <ExperimentOutlined />, '策略回测') },
+    { key: 'rbt', label: menuLink('/real-backtest', <DatabaseOutlined />, '真实数据回测') },
+    { key: 'btv', label: menuLink('/backtest-verify', <CheckCircleOutlined />, '回测验证') },
   ],
 };
 
 const leapsItems = {
   items: [
-    { key: 'leaps', label: <Link to="/leaps" style={{ ...linkStyle, color: '#52c41a' }}><RocketOutlined /> LEAPS策略</Link> },
-    { key: 'lu', label: <Link to="/leaps-ultimate" style={{ ...linkStyle, color: '#faad14' }}><CrownOutlined /> LEAPS终极</Link> },
-    { key: 'lu2', label: <Link to="/leaps-ultimate-v2" style={{ ...linkStyle, color: '#722ed1' }}><SwapOutlined /> 终极2.0</Link> },
-    { key: 'us', label: <Link to="/us-leaps" style={{ ...linkStyle, color: '#52c41a' }}><DollarOutlined /> 美股LEAPS</Link> },
-    { key: 'qqq', label: <Link to="/qqq-leaps" style={{ ...linkStyle, color: '#eb2f96' }}><FundOutlined /> QQQ策略</Link> },
+    { key: 'leaps', label: menuLink('/leaps', <RocketOutlined />, 'LEAPS策略', '#389e0d') },
+    { key: 'lu', label: menuLink('/leaps-ultimate', <CrownOutlined />, 'LEAPS终极', '#d48806') },
+    { key: 'lu2', label: menuLink('/leaps-ultimate-v2', <SwapOutlined />, '终极2.0', '#531dab') },
+    { key: 'us', label: menuLink('/us-leaps', <DollarOutlined />, '美股LEAPS', '#389e0d') },
+    { key: 'qqq', label: menuLink('/qqq-leaps', <FundOutlined />, 'QQQ策略', '#c41d7f') },
   ],
 };
 
 const toolItems = {
   items: [
-    { key: 'iv', label: <Link to="/iv-calculator" style={linkStyle}><CalculatorOutlined /> IV计算器</Link> },
-    { key: 'debug', label: <Link to="/deribit-debug" style={linkStyle}><BugOutlined /> 数据调试</Link> },
-    { key: 'dc', label: <Link to="/data-center" style={{ ...linkStyle, color: '#13c2c2' }}><CloudServerOutlined /> 数据中心</Link> },
+    { key: 'iv', label: menuLink('/iv-calculator', <CalculatorOutlined />, 'IV计算器') },
+    { key: 'debug', label: menuLink('/deribit-debug', <BugOutlined />, '数据调试') },
+    { key: 'dc', label: menuLink('/data-center', <CloudServerOutlined />, '数据中心', '#08979c') },
   ],
 };
 
@@ -69,12 +74,12 @@ export default function Header() {
           </span>
         </Dropdown>
         <Dropdown menu={leapsItems} placement="bottomRight">
-          <span style={{ color: '#52c41a', fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ color: '#95de64', fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
             <RocketOutlined /> LEAPS <DownOutlined style={{ fontSize: 10 }} />
           </span>
         </Dropdown>
         <Dropdown menu={toolItems} placement="bottomRight">
-          <span style={{ color: '#13c2c2', fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ color: '#5cdbd3', fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
             <ToolOutlined /> 工具 <DownOutlined style={{ fontSize: 10 }} />
           </span>
         </Dropdown>
