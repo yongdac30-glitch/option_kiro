@@ -1,8 +1,8 @@
 """美股 LEAPS 策略 API
 
-使用 yfinance 获取美股期权数据：
-- 实时扫描：获取当前期权链，筛选最优 LEAPS CALL
-- 回测：yfinance 历史股价 + BS 模型估算期权价格
+使用 Yahoo Finance REST API 获取美股历史价格数据（绕过 yfinance 库限流）：
+- 回测：Yahoo Finance REST API 历史股价 + BS 模型估算期权价格
+- 实时扫描：yfinance 获取当前期权链，筛选最优 LEAPS CALL
 - 支持任意美股标的（AAPL, MSFT, SPY, QQQ 等）
 
 美股期权特点：
@@ -18,12 +18,14 @@ from datetime import datetime, date, timedelta, timezone
 import asyncio
 import json
 import math
+import httpx
 
 import time
 
 import yfinance as yf
 
 from app.services.pricing import black_scholes_price, calculate_time_to_expiration
+from app.core.config import create_http_client
 
 # ── Retry helper for yfinance rate limits ────────────────────────────
 MAX_RETRIES = 3
@@ -52,6 +54,9 @@ router = APIRouter(prefix="/api/us-leaps", tags=["us-leaps"])
 US_RISK_FREE_RATE = 0.045
 US_CONTRACT_MULTIPLIER = 100  # 1 contract = 100 shares
 
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
+
 
 def _safe_float(val, default=0.0):
     """Safely convert a value to float, handling NaN/None/inf."""
@@ -79,10 +84,101 @@ def _safe_int(val, default=0):
         return default
 
 
-# ── yfinance helpers ─────────────────────────────────────────────────
+# ── Yahoo Finance REST API (primary data source) ─────────────────────
+
+async def _fetch_yahoo_prices(ticker: str, start: date, end: date) -> Dict[date, float]:
+    """Fetch daily close prices from Yahoo Finance REST API directly.
+    Bypasses yfinance library which is often rate-limited."""
+    start_ts = int(datetime.combine(start, datetime.min.time(),
+                                     tzinfo=timezone.utc).timestamp())
+    end_ts = int(datetime.combine(end + timedelta(days=1), datetime.min.time(),
+                                   tzinfo=timezone.utc).timestamp())
+
+    url = YAHOO_CHART_URL.format(symbol=ticker)
+    params = {
+        "period1": str(start_ts),
+        "period2": str(end_ts),
+        "interval": "1d",
+        "includePrePost": "false",
+    }
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            async with create_http_client(timeout=30.0, connect_timeout=10.0) as client:
+                resp = await client.get(url, params=params, headers=YAHOO_HEADERS)
+                if resp.status_code == 429:
+                    await asyncio.sleep(2.0 * (attempt + 1))
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as e:
+            last_error = e
+            await asyncio.sleep(2.0 * (attempt + 1))
+            continue
+
+        chart = data.get("chart", {})
+        results = chart.get("result", [])
+        if not results:
+            raise ValueError(f"Yahoo Finance 无数据: {ticker}")
+
+        result = results[0]
+        timestamps = result.get("timestamp", [])
+        indicators = result.get("indicators", {})
+        quotes = indicators.get("quote", [{}])[0]
+        closes = quotes.get("close", [])
+        adj_close_list = indicators.get("adjclose", [{}])
+        adj_closes = adj_close_list[0].get("adjclose", []) if adj_close_list else []
+
+        prices = {}
+        for i, ts in enumerate(timestamps):
+            if ts is None:
+                continue
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc).date()
+            price = None
+            if adj_closes and i < len(adj_closes) and adj_closes[i] is not None:
+                price = float(adj_closes[i])
+            elif i < len(closes) and closes[i] is not None:
+                price = float(closes[i])
+            if price and price > 0:
+                prices[dt] = round(price, 4)
+
+        if not prices:
+            raise ValueError(f"Yahoo Finance 返回空数据: {ticker}")
+
+        return prices
+
+    raise ValueError(f"获取 {ticker} 数据失败(重试3次): {last_error}")
+
+
+async def _fetch_yahoo_spot(ticker: str) -> float:
+    """Fetch current spot price from Yahoo Finance REST API."""
+    url = YAHOO_CHART_URL.format(symbol=ticker)
+    params = {"range": "1d", "interval": "1d"}
+
+    async with create_http_client(timeout=15.0, connect_timeout=8.0) as client:
+        resp = await client.get(url, params=params, headers=YAHOO_HEADERS)
+        resp.raise_for_status()
+        data = resp.json()
+
+    chart = data.get("chart", {})
+    results = chart.get("result", [])
+    if not results:
+        raise ValueError(f"无法获取 {ticker} 现价")
+
+    meta = results[0].get("meta", {})
+    price = meta.get("regularMarketPrice", 0)
+    if not price:
+        price = meta.get("previousClose", 0)
+    if not price or price <= 0:
+        raise ValueError(f"无法获取 {ticker} 现价")
+    return float(price)
+
+
+# ── yfinance helpers (kept for live option chain scanning) ───────────
 
 def _get_spot_price(ticker_symbol: str) -> float:
-    """Get current spot price via yfinance (with retry)."""
+    """Get current spot price via yfinance (with retry). Fallback for live scan."""
     def _fetch():
         t = yf.Ticker(ticker_symbol)
         info = t.fast_info
@@ -94,7 +190,7 @@ def _get_spot_price(ticker_symbol: str) -> float:
 
 
 def _get_historical_prices(ticker_symbol: str, start: date, end: date) -> Dict[date, float]:
-    """Get historical daily close prices via yfinance (with retry)."""
+    """Get historical daily close prices via yfinance (with retry). Fallback only."""
     def _fetch():
         t = yf.Ticker(ticker_symbol)
         df = t.history(start=start.isoformat(), end=(end + timedelta(days=1)).isoformat(),
@@ -766,12 +862,11 @@ async def us_leaps_stream(req: BacktestRequest):
     )
 
     async def event_generator():
-        # Step 1: Fetch historical prices
-        yield f"data: {json.dumps({'type': 'progress', 'day': 0, 'total': 1, 'date': req.start_date.isoformat(), 'pct': 0, 'status': f'正在从yfinance获取{req.ticker}历史价格(如遇限流会自动重试)...'})}\n\n"
+        # Step 1: Fetch historical prices via Yahoo Finance REST API
+        yield f"data: {json.dumps({'type': 'progress', 'day': 0, 'total': 1, 'date': req.start_date.isoformat(), 'pct': 0, 'status': f'正在获取{req.ticker}历史价格...'})}\n\n"
 
         try:
-            price_map = await asyncio.get_event_loop().run_in_executor(
-                None, _get_historical_prices, req.ticker, req.start_date, req.end_date)
+            price_map = await _fetch_yahoo_prices(req.ticker, req.start_date, req.end_date)
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': f'获取{req.ticker}历史价格失败: {str(e)}'})}\n\n"
             return
@@ -845,10 +940,14 @@ async def us_leaps_live_scan(req: LiveScanRequest):
         yield f"data: {json.dumps({'type': 'step', 'step': 1, 'total_steps': 5, 'message': f'获取{req.ticker}当前价格...'})}\n\n"
 
         try:
-            spot = await asyncio.get_event_loop().run_in_executor(
-                None, _get_spot_price, req.ticker)
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'message': f'获取{req.ticker}价格失败: {str(e)}'})}\n\n"
+            spot = await _fetch_yahoo_spot(req.ticker)
+        except Exception:
+            # Fallback to yfinance
+            try:
+                spot = await asyncio.get_event_loop().run_in_executor(
+                    None, _get_spot_price, req.ticker)
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'error', 'message': f'获取{req.ticker}价格失败: {str(e)}'})}\n\n"
             return
 
         if spot <= 0:
