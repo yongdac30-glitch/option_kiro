@@ -18,6 +18,7 @@ import json
 import httpx
 
 from app.services.pricing import black_scholes_price, calculate_time_to_expiration, implied_volatility
+from app.core.config import create_http_client
 from app.api.deribit import (
     fetch_deribit_index_prices,
     get_option_price_via_smile,
@@ -108,7 +109,7 @@ async def fetch_daily_prices(underlying: str, start_date: date, end_date: date) 
     start_ts = int(datetime.combine(start_date, datetime.min.time(),
                                      tzinfo=timezone.utc).timestamp() * 1000)
     current_after = end_ts
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+    async with create_http_client() as client:
         for _ in range(50):
             url = f"{OKX_BASE}/api/v5/market/history-index-candles"
             params = {"instId": inst_id, "bar": "1D", "limit": "100", "after": str(current_after)}
@@ -748,7 +749,7 @@ async def run_real_leaps_backtest(
         if progress_callback:
             await progress_callback(day_idx, total_days, today, status)
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+    async with create_http_client() as client:
 
         async def _get_price(expiry, strike, spot, today):
             """Fast single-strike price lookup."""

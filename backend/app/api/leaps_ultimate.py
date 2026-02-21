@@ -20,6 +20,7 @@ import math
 import httpx
 
 from app.services.pricing import black_scholes_price, calculate_time_to_expiration
+from app.core.config import create_http_client
 from app.api.deribit import (
     fetch_deribit_index_prices,
     find_nearest_strike,
@@ -194,7 +195,7 @@ async def fetch_okx_prices(underlying: str, start_date: date, end_date: date) ->
     start_ts = int(datetime.combine(start_date, datetime.min.time(),
                                      tzinfo=timezone.utc).timestamp() * 1000)
     current_after = end_ts
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+    async with create_http_client() as client:
         for _ in range(50):
             url = f"{OKX_BASE}/api/v5/market/history-index-candles"
             params = {"instId": inst_id, "bar": "1D", "limit": "100", "after": str(current_after)}
@@ -263,7 +264,7 @@ async def run_leaps_ultimate(
         if progress_callback:
             await progress_callback(day_idx, _total_observe[0], today, status)
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+    async with create_http_client() as client:
 
         async def _get_price(expiry, strike, spot, today):
             """Get option price — real data or BS model."""
@@ -851,7 +852,7 @@ async def leaps_live_scan(req: LiveScanRequest):
     """Scan current market for the best LEAPS contract to hold today."""
     today = date.today()
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+    async with create_http_client() as client:
         # 1) Get live spot price from Deribit
         try:
             index_name = f"{req.underlying.lower()}_usd"

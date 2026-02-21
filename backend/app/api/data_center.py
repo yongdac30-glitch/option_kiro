@@ -16,6 +16,7 @@ import json
 import httpx
 
 from app.core.database import SessionLocal
+from app.core.config import create_http_client, get_proxy_config, set_proxy
 from app.models.deribit_cache import DeribitPriceCache, DeribitIVCache
 from app.models.data_collection import OkxPriceCache, DataCollectionLog
 from sqlalchemy import func as sa_func, distinct
@@ -61,7 +62,7 @@ async def _fetch_okx_prices_with_cache(
     current_after = end_ts
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        async with create_http_client() as client:
             for _ in range(50):
                 url = f"{OKX_BASE}/api/v5/market/history-index-candles"
                 params = {"instId": inst_id, "bar": "1D", "limit": "100", "after": str(current_after)}
@@ -282,9 +283,7 @@ async def collect_data_stream(req: CollectRequest):
                     consecutive_errors = 0
                     MAX_CONSECUTIVE_ERRORS = 5
 
-                    async with httpx.AsyncClient(
-                        timeout=httpx.Timeout(30.0, connect=10.0)
-                    ) as client:
+                    async with create_http_client() as client:
                         for idx, td in enumerate(sampled_dates):
                             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                                 yield f"data: {json.dumps({'type': 'progress', 'pct': 20 + int(80 * (idx + 1) / total_sampled), 'message': f'连续 {MAX_CONSECUTIVE_ERRORS} 次网络错误, 停止IV收取 (已获取 {iv_count} 个IV点)'})}\n\n"
@@ -772,3 +771,46 @@ async def batch_delete_iv(body: BatchDeleteIV):
         return {"message": f"已删除 {count} 条记录", "count": count}
     finally:
         db.close()
+
+
+# ── Proxy settings ───────────────────────────────────────────────────
+
+class ProxySettings(BaseModel):
+    enabled: bool = False
+    url: Optional[str] = None
+
+
+@router.get("/proxy")
+async def get_proxy():
+    """获取当前代理设置。"""
+    return get_proxy_config()
+
+
+@router.put("/proxy")
+async def update_proxy(body: ProxySettings):
+    """更新代理设置（运行时生效，无需重启）。"""
+    set_proxy(body.enabled, body.url)
+    cfg = get_proxy_config()
+    status = "已启用" if cfg["enabled"] else "已关闭"
+    return {"message": f"代理{status}", **cfg}
+
+
+@router.get("/proxy/test")
+async def test_proxy():
+    """测试代理连接是否正常。"""
+    results = {}
+    for use_proxy in [False, True]:
+        label = "proxy" if use_proxy else "direct"
+        try:
+            client = create_http_client(timeout=10.0, connect_timeout=5.0, use_proxy=use_proxy)
+            async with client:
+                resp = await client.get("https://www.deribit.com/api/v2/public/get_time")
+                data = resp.json()
+                results[label] = {
+                    "ok": True,
+                    "status": resp.status_code,
+                    "server_time": data.get("result"),
+                }
+        except Exception as e:
+            results[label] = {"ok": False, "error": str(e)}
+    return results

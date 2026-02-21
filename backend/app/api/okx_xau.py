@@ -12,6 +12,7 @@ import httpx
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from app.core.database import SessionLocal
+from app.core.config import create_http_client
 from app.models.okx_xau_tick import OkxXauTick
 
 router = APIRouter(prefix="/api/okx-xau", tags=["okx-xau"])
@@ -216,7 +217,7 @@ async def _rest_collector():
     _collect_mode = "rest"
     print("[OKX XAU] Using REST API polling fallback (1s interval)")
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with create_http_client(timeout=10.0, connect_timeout=10.0) as client:
         while _collecting:
             try:
                 # Fetch spot + swap tickers in parallel

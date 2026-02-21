@@ -12,6 +12,7 @@ import {
   ReloadOutlined, LineChartOutlined, BarChartOutlined,
   HomeOutlined, WarningOutlined, EditOutlined, SaveOutlined,
   CloseOutlined, FilterOutlined, ScissorOutlined, PauseCircleOutlined,
+  ApiOutlined, CheckCircleOutlined, CloseCircleOutlined,
 } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import dayjs from 'dayjs';
@@ -77,6 +78,13 @@ export default function DataCenter() {
   const [batchDeleteVisible, setBatchDeleteVisible] = useState(false);
   const [batchDeleteForm] = Form.useForm();
 
+  // Proxy settings
+  const [proxyEnabled, setProxyEnabled] = useState(false);
+  const [proxyUrl, setProxyUrl] = useState('socks5://127.0.0.1:10808');
+  const [proxyLoading, setProxyLoading] = useState(false);
+  const [proxyTestResult, setProxyTestResult] = useState(null);
+  const [proxyTestLoading, setProxyTestLoading] = useState(false);
+
   const loadStats = useCallback(async () => {
     setLoading(true);
     try {
@@ -90,6 +98,42 @@ export default function DataCenter() {
   }, []);
 
   useEffect(() => { loadStats(); }, [loadStats]);
+
+  // ── Proxy ──
+  const loadProxy = useCallback(async () => {
+    try {
+      const data = await dataCenterService.getProxy();
+      setProxyEnabled(data.enabled);
+      setProxyUrl(data.url || 'socks5://127.0.0.1:10808');
+    } catch (e) { /* ignore */ }
+  }, []);
+
+  useEffect(() => { loadProxy(); }, [loadProxy]);
+
+  const handleProxySave = async () => {
+    setProxyLoading(true);
+    try {
+      const result = await dataCenterService.updateProxy(proxyEnabled, proxyUrl);
+      message.success(result.message);
+    } catch (e) {
+      message.error('保存代理设置失败');
+    } finally {
+      setProxyLoading(false);
+    }
+  };
+
+  const handleProxyTest = async () => {
+    setProxyTestLoading(true);
+    setProxyTestResult(null);
+    try {
+      const result = await dataCenterService.testProxy();
+      setProxyTestResult(result);
+    } catch (e) {
+      message.error('测试失败: ' + e.message);
+    } finally {
+      setProxyTestLoading(false);
+    }
+  };
 
   // ── Collect ──
   const collectControllerRef = useRef(null);
@@ -516,6 +560,55 @@ export default function DataCenter() {
               label: '数据管理',
               children: (
                 <Space direction="vertical" style={{ width: '100%' }}>
+                  <Card size="small" title={<><ApiOutlined /> 网络代理设置</>}>
+                    <Row gutter={16} align="middle" style={{ marginBottom: 12 }}>
+                      <Col>
+                        <Space>
+                          <Text>启用代理:</Text>
+                          <Switch checked={proxyEnabled} onChange={(v) => setProxyEnabled(v)} />
+                          <Tag color={proxyEnabled ? 'green' : 'default'}>{proxyEnabled ? '已启用' : '已关闭'}</Tag>
+                        </Space>
+                      </Col>
+                      <Col flex="auto">
+                        <Space>
+                          <Text>代理地址:</Text>
+                          <input
+                            value={proxyUrl}
+                            onChange={(e) => setProxyUrl(e.target.value)}
+                            placeholder="socks5://127.0.0.1:10808"
+                            style={{ width: 300, padding: '4px 8px', border: '1px solid #d9d9d9', borderRadius: 4 }}
+                          />
+                        </Space>
+                      </Col>
+                      <Col>
+                        <Space>
+                          <Button type="primary" icon={<SaveOutlined />} onClick={handleProxySave} loading={proxyLoading}>保存</Button>
+                          <Button icon={<ApiOutlined />} onClick={handleProxyTest} loading={proxyTestLoading}>测试连接</Button>
+                        </Space>
+                      </Col>
+                    </Row>
+                    <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
+                      支持 socks5 和 http 代理，例如 v2rayN 默认: socks5://127.0.0.1:10808 或 http://127.0.0.1:10809
+                    </Text>
+                    {proxyTestResult && (
+                      <Row gutter={16} style={{ marginTop: 8 }}>
+                        <Col span={12}>
+                          <Card size="small" title="直连">
+                            {proxyTestResult.direct?.ok
+                              ? <Text type="success"><CheckCircleOutlined /> 连接成功 (HTTP {proxyTestResult.direct.status})</Text>
+                              : <Text type="danger"><CloseCircleOutlined /> 连接失败: {proxyTestResult.direct?.error}</Text>}
+                          </Card>
+                        </Col>
+                        <Col span={12}>
+                          <Card size="small" title="代理">
+                            {proxyTestResult.proxy?.ok
+                              ? <Text type="success"><CheckCircleOutlined /> 连接成功 (HTTP {proxyTestResult.proxy.status})</Text>
+                              : <Text type="danger"><CloseCircleOutlined /> 连接失败: {proxyTestResult.proxy?.error}</Text>}
+                          </Card>
+                        </Col>
+                      </Row>
+                    )}
+                  </Card>
                   <Card size="small" title="缓存统计">
                     <Button icon={<ReloadOutlined />} onClick={loadStats} loading={loading} style={{ marginBottom: 16 }}>刷新统计</Button>
                     {stats && (

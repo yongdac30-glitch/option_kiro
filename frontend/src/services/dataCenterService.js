@@ -146,4 +146,22 @@ export const dataCenterService = {
     const resp = await api.post('/api/data-center/iv-batch-delete', params);
     return resp.data;
   },
+
+  /** 获取代理设置 */
+  async getProxy() {
+    const resp = await api.get('/api/data-center/proxy');
+    return resp.data;
+  },
+
+  /** 更新代理设置 */
+  async updateProxy(enabled, url) {
+    const resp = await api.put('/api/data-center/proxy', { enabled, url });
+    return resp.data;
+  },
+
+  /** 测试代理连接 */
+  async testProxy() {
+    const resp = await api.get('/api/data-center/proxy/test');
+    return resp.data;
+  },
 };

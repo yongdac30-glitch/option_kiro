@@ -16,6 +16,7 @@ import math
 import httpx
 
 from app.services.pricing import black_scholes_price, calculate_time_to_expiration
+from app.core.config import create_http_client
 from app.api.deribit import (
     fetch_deribit_index_prices,
     find_nearest_strike,
@@ -83,7 +84,7 @@ async def run_leaps_v2(
         if progress_callback:
             await progress_callback(day_idx, _total_observe[0], today, status)
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+    async with create_http_client() as client:
 
         async def _get_price(expiry, strike, spot, today):
             if use_real_data:

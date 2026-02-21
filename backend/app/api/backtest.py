@@ -8,6 +8,7 @@ import math
 import asyncio
 
 from app.services.pricing import black_scholes_price, calculate_time_to_expiration
+from app.core.config import create_http_client
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
@@ -68,7 +69,7 @@ async def fetch_daily_prices(underlying: str, start_date: date, end_date: date) 
                                      tzinfo=timezone.utc).timestamp() * 1000)
 
     current_after = end_ts
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+    async with create_http_client() as client:
         for _ in range(50):  # max 50 pages = 5000 days
             url = f"{OKX_BASE}/api/v5/market/history-index-candles"
             params = {"instId": inst_id, "bar": "1D", "limit": "100", "after": str(current_after)}

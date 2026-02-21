@@ -14,6 +14,7 @@ from app.services.pricing import (
     implied_volatility,
 )
 from app.core.database import SessionLocal
+from app.core.config import create_http_client
 from app.models.deribit_cache import DeribitPriceCache, DeribitIVCache
 from app.api.deribit import (
     DERIBIT_BASE, RATE_DELAY, RISK_FREE_RATE,
@@ -77,7 +78,7 @@ async def list_instruments(
         "kind": "option",
         "expired": str(expired).lower(),
     }
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with create_http_client() as client:
         resp = await client.get(url, params=params)
         resp.raise_for_status()
         data = resp.json()
@@ -134,7 +135,7 @@ async def test_fetch_trades(req: TradeTestRequest):
         tzinfo=timezone.utc
     ).timestamp() * 1000)
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with create_http_client() as client:
         # ── Method 1: Trade API ──
         url1 = f"{DERIBIT_BASE}/public/get_last_trades_by_instrument_and_time"
         params1 = {
@@ -319,7 +320,7 @@ async def test_fetch_smile(req: SmileTestRequest):
             req.target_date + timedelta(days=2), datetime.min.time(),
             tzinfo=timezone.utc
         ).timestamp() * 1000)
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with create_http_client() as client:
             resp = await client.get(url, params={
                 "instrument_name": instrument,
                 "start_timestamp": ts_start,
@@ -350,7 +351,7 @@ async def test_fetch_smile(req: SmileTestRequest):
     smile_points = []
     db_points = []
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with create_http_client() as client:
         for strike in sorted(candidates):
             instrument = build_instrument_name(req.underlying, req.expiry_date, strike, req.option_type)
 
@@ -523,7 +524,7 @@ async def batch_fetch_smiles(req: BatchSmileRequest):
         req.end_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
     ).timestamp() * 1000)
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with create_http_client() as client:
         resp = await client.get(url, params={
             "instrument_name": instrument,
             "start_timestamp": start_ts,
@@ -548,7 +549,7 @@ async def batch_fetch_smiles(req: BatchSmileRequest):
     total_cached = 0
     total_saved = 0
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with create_http_client() as client:
         for d in sorted(price_map.keys()):
             if d < req.start_date or d > req.end_date:
                 continue
@@ -664,7 +665,7 @@ async def atm_iv_history(req: ATMIVHistoryRequest):
     dates = sorted(d for d in price_map.keys() if req.start_date <= d <= req.end_date)
     results = []
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with create_http_client() as client:
         for d in dates:
             spot = price_map[d]
             step = get_strike_step(req.underlying, spot)

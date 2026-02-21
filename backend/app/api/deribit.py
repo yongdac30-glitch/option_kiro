@@ -17,6 +17,7 @@ from app.services.pricing import (
     implied_volatility,
 )
 from app.core.database import SessionLocal
+from app.core.config import create_http_client
 from app.models.deribit_cache import DeribitPriceCache, DeribitIVCache
 
 router = APIRouter(prefix="/api/deribit", tags=["deribit"])
@@ -350,7 +351,7 @@ async def fetch_deribit_index_prices(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with create_http_client() as client:
             resp = await client.get(url, params=params)
             resp.raise_for_status()
             data = resp.json()
@@ -1102,7 +1103,7 @@ async def run_real_backtest_engine(
     leaps_total_proceeds = 0.0
     leaps_trades_count = 0
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with create_http_client() as client:
         for day_idx, today in enumerate(dates):
             spot = price_map[today]
 
@@ -2658,7 +2659,7 @@ async def verify_backtest(request: VerifyRequest):
 
     dates = sorted(price_map.keys())
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with create_http_client() as client:
         for today in dates:
             spot = price_map[today]
             day_events = []

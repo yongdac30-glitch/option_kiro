@@ -4,7 +4,7 @@ from typing import Optional
 import httpx
 from datetime import datetime, timezone, date as date_type
 from app.services.pricing import implied_volatility, calculate_time_to_expiration
-from app.core.config import settings
+from app.core.config import settings, create_http_client
 
 router = APIRouter(prefix="/api/okx", tags=["okx"])
 
@@ -14,7 +14,7 @@ TIMEOUT = 15.0
 
 async def _okx_get(path: str, params: dict) -> dict:
     """Make a GET request to OKX public API."""
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+    async with create_http_client(timeout=TIMEOUT, connect_timeout=TIMEOUT) as client:
         resp = await client.get(
             f"{OKX_BASE}{path}",
             params=params,
