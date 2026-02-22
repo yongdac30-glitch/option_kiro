@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 settings = Settings()
 
 # ── Runtime proxy state (can be toggled via API without restart) ──
-_proxy_enabled: bool = False
+_proxy_enabled: bool = True
 _proxy_url: str = settings.PROXY_URL or "socks5://127.0.0.1:10808"
 
 

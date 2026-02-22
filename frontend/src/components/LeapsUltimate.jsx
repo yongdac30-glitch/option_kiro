@@ -80,6 +80,7 @@ export default function LeapsUltimate() {
       initial_capital: values.initial_capital,
       contract_multiplier: values.contract_multiplier,
       max_annual_tv_pct: values.max_annual_tv_pct,
+      max_open_annual_tv_pct: values.max_open_annual_tv_pct,
       min_expiry_months: values.min_expiry_months,
       close_days_before: values.close_days_before,
       quantity: values.quantity,
@@ -217,6 +218,7 @@ export default function LeapsUltimate() {
                 initial_capital: 100000,
                 contract_multiplier: 0.01,
                 max_annual_tv_pct: 10,
+                max_open_annual_tv_pct: 16,
                 min_expiry_months: 12,
                 close_days_before: 30,
                 quantity: 1,
@@ -283,6 +285,13 @@ export default function LeapsUltimate() {
                 <Col xs={24} sm={6}>
                   <Form.Item name="max_annual_tv_pct" label="最大年化时间价值%">
                     <InputNumber style={{ width: '100%' }} min={1} max={50} step={1} precision={1}
+                      formatter={(v) => v + '%'} parser={(v) => v.replace('%', '')} />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} sm={6}>
+                  <Form.Item name="max_open_annual_tv_pct" label="开仓年化TV%限制"
+                    tooltip="选出的合约年化TV%超过此值时不开仓，保持空仓等待更好机会">
+                    <InputNumber style={{ width: '100%' }} min={1} max={100} step={1} precision={1}
                       formatter={(v) => v + '%'} parser={(v) => v.replace('%', '')} />
                   </Form.Item>
                 </Col>

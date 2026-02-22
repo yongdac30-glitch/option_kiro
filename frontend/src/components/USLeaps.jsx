@@ -100,12 +100,15 @@ export default function USLeaps() {
       end_date: values.end_date.format('YYYY-MM-DD'),
       initial_capital: values.initial_capital,
       max_annual_tv_pct: values.max_annual_tv_pct,
+      max_open_annual_tv_pct: values.max_open_annual_tv_pct,
       min_expiry_months: values.min_expiry_months,
       close_days_before: values.close_days_before,
       num_contracts: values.num_contracts,
       num_strikes: values.num_strikes,
       open_interval_days: values.open_interval_days,
       default_iv: values.default_iv,
+      use_dynamic_iv: values.use_dynamic_iv || false,
+      dynamic_iv_window: values.dynamic_iv_window || 30,
       enable_roll: values.enable_roll || false,
       roll_annual_tv_pct: values.roll_annual_tv_pct || 8,
     };
@@ -229,12 +232,15 @@ export default function USLeaps() {
                 end_date: dayjs(),
                 initial_capital: 100000,
                 max_annual_tv_pct: 10,
+                max_open_annual_tv_pct: 16,
                 min_expiry_months: 12,
                 close_days_before: 30,
                 num_contracts: 1,
                 num_strikes: 15,
                 open_interval_days: 30,
                 default_iv: 0.3,
+                use_dynamic_iv: false,
+                dynamic_iv_window: 30,
                 enable_roll: false,
                 roll_annual_tv_pct: 8,
               }}
@@ -298,11 +304,28 @@ export default function USLeaps() {
                   </Form.Item>
                 </Col>
                 <Col xs={24} sm={6}>
-                  <Form.Item name="default_iv" label="回测默认IV"
-                    tooltip="BS模型使用的隐含波动率，建议AAPL用0.25-0.35，TSLA用0.5-0.7">
-                    <InputNumber style={{ width: '100%' }} min={0.05} max={2.0} step={0.05} precision={2} />
+                  <Form.Item name="use_dynamic_iv" label="动态IV估算" valuePropName="checked"
+                    tooltip="开启后使用滚动历史波动率代替固定IV，更贴近真实市场">
+                    <Switch checkedChildren="动态" unCheckedChildren="固定" />
                   </Form.Item>
                 </Col>
+                <Form.Item noStyle shouldUpdate={(prev, cur) => prev.use_dynamic_iv !== cur.use_dynamic_iv}>
+                  {({ getFieldValue }) => getFieldValue('use_dynamic_iv') ? (
+                    <Col xs={24} sm={6}>
+                      <Form.Item name="dynamic_iv_window" label="滚动窗口(天)"
+                        tooltip="使用过去N个交易日的收盘价计算年化历史波动率作为IV">
+                        <InputNumber style={{ width: '100%' }} min={10} max={120} step={5} />
+                      </Form.Item>
+                    </Col>
+                  ) : (
+                    <Col xs={24} sm={6}>
+                      <Form.Item name="default_iv" label="回测默认IV"
+                        tooltip="BS模型使用的隐含波动率，建议AAPL用0.25-0.35，TSLA用0.5-0.7">
+                        <InputNumber style={{ width: '100%' }} min={0.05} max={2.0} step={0.05} precision={2} />
+                      </Form.Item>
+                    </Col>
+                  )}
+                </Form.Item>
               </Row>
 
               <Divider orientation="left" plain>LEAPS 筛选参数</Divider>
@@ -314,13 +337,20 @@ export default function USLeaps() {
                   </Form.Item>
                 </Col>
                 <Col xs={24} sm={6}>
+                  <Form.Item name="max_open_annual_tv_pct" label="开仓年化TV%限制"
+                    tooltip="选出的合约年化TV%超过此值时不开仓，保持空仓等待更好机会">
+                    <InputNumber style={{ width: '100%' }} min={1} max={100} step={1} precision={1}
+                      formatter={(v) => v + '%'} parser={(v) => v.replace('%', '')} />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} sm={6}>
                   <Form.Item name="min_expiry_months" label="最短到期月数">
                     <InputNumber style={{ width: '100%' }} min={6} max={36} step={3} />
                   </Form.Item>
                 </Col>
                 <Col xs={24} sm={6}>
                   <Form.Item name="close_days_before" label="到期前N天平仓">
-                    <InputNumber style={{ width: '100%' }} min={7} max={90} step={7} />
+                    <InputNumber style={{ width: '100%' }} min={7} max={360} step={7} />
                   </Form.Item>
                 </Col>
                 <Col xs={24} sm={6}>
@@ -340,8 +370,8 @@ export default function USLeaps() {
                 </Col>
                 <Col xs={24} sm={6}>
                   <Form.Item name="roll_annual_tv_pct" label="换仓年化TV阈值%"
-                    tooltip="换仓年化成本低于此阈值时执行换仓">
-                    <InputNumber style={{ width: '100%' }} min={1} max={30} step={0.5} precision={1}
+                    tooltip="换仓年化成本低于此阈值时执行换仓。负数表示仅在换仓有利可图时才换仓（远期TV低于当前TV）">
+                    <InputNumber style={{ width: '100%' }} min={-30} max={30} step={0.5} precision={1}
                       formatter={(v) => v + '%'} parser={(v) => v.replace('%', '')} />
                   </Form.Item>
                 </Col>
@@ -413,7 +443,11 @@ export default function USLeaps() {
                 <Space>
                   <CheckCircleOutlined style={{ color: '#52c41a' }} />
                   回测摘要 — {result.summary?.ticker}
-                  <Tag color="orange">BS模型 (IV={result.summary?.default_iv})</Tag>
+                  <Tag color="orange">
+                    {result.summary?.use_dynamic_iv
+                      ? `BS模型 (动态IV, ${result.summary?.dynamic_iv_window}日窗口)`
+                      : `BS模型 (IV=${result.summary?.default_iv})`}
+                  </Tag>
                   <Tag color="blue">{result.summary?.backtest_days}天</Tag>
                 </Space>
               } style={{ marginTop: 16 }}>
@@ -497,6 +531,37 @@ export default function USLeaps() {
                   </ComposedChart>
                 </ResponsiveContainer>
               </Card>
+
+              {result.equity_curve?.some(e => e.iv != null) && (
+                <Card title={
+                  <Space>
+                    <LineChartOutlined style={{ color: '#722ed1' }} />
+                    <span>滚动历史波动率 (IV) 变化</span>
+                    <Tag color="purple">{result.summary?.dynamic_iv_window || 30}日窗口</Tag>
+                  </Space>
+                } style={{ marginTop: 16 }}>
+                  <ResponsiveContainer width="100%" height={280}>
+                    <ComposedChart data={result.equity_curve.filter(e => e.iv != null)}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="date" tick={{ fontSize: 11 }} interval="preserveStartEnd"
+                        tickFormatter={(v) => v.substring(5)} />
+                      <YAxis yAxisId="iv" tick={{ fontSize: 11 }} domain={['auto', 'auto']}
+                        tickFormatter={(v) => (v * 100).toFixed(0) + '%'} />
+                      <YAxis yAxisId="spot" orientation="right" tick={{ fontSize: 11 }} domain={['auto', 'auto']} />
+                      <Tooltip formatter={(value, name) => {
+                        if (name === '历史波动率') return [(value * 100).toFixed(1) + '%', name];
+                        if (typeof value === 'number') return ['$' + value.toLocaleString(), name];
+                        return [value, name];
+                      }} />
+                      <Legend />
+                      <Area yAxisId="iv" type="monotone" dataKey="iv" name="历史波动率"
+                        stroke="#722ed1" fill="#722ed120" strokeWidth={2} />
+                      <Line yAxisId="spot" type="monotone" dataKey="spot" name="标的价格"
+                        stroke="#faad14" dot={false} strokeWidth={1} opacity={0.4} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </Card>
+              )}
 
               <Card title="交易记录" style={{ marginTop: 16 }}>
                 <Table

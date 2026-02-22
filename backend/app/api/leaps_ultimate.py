@@ -139,6 +139,7 @@ class LeapsUltimateConfig(BaseModel):
 
     # 核心筛选参数
     max_annual_tv_pct: float = Field(default=10.0, description="最大年化时间价值%")
+    max_open_annual_tv_pct: float = Field(default=16.0, description="开仓年化TV%限制，超过则保持空仓")
     min_expiry_months: int = Field(default=12, description="最短到期月数")
     close_days_before: int = Field(default=30, description="到期前N天平仓")
     quantity: float = Field(default=1.0, description="每次买入数量")
@@ -520,45 +521,55 @@ async def run_leaps_ultimate(
 
                         if best_overall is not None:
                             strike, price, iv, src, atv, intr, tv, expiry = best_overall
-                            scan_entry["selected_strike"] = float(round(strike, 2))
-                            scan_entry["selected_expiry"] = expiry.isoformat()
-                            cost = price * qty * mult
-                            print(f"[LEAPS终极] {today}: 选中 K={strike}, price={price:.2f}, "
-                                  f"cost={cost:.2f}, cash={cash:.2f}, qty={qty}, mult={mult}")
-                            scan_entry["result"] = f"开仓(cost=${cost:.2f})"
-                            if cost <= cash and cost > 0:
-                                cash -= cost
-                                position = {
-                                    "strike": strike, "expiry": expiry, "quantity": qty,
-                                    "open_price": float(price), "open_spot": spot,
-                                    "open_date": today, "iv_used": iv, "data_source": src,
-                                }
-
-                                trades.append(TradeRecord(
-                                    date=today.isoformat(), action="OPEN",
-                                    strike=float(round(strike, 2)),
-                                    expiry=expiry.isoformat(),
-                                    spot=float(round(spot, 2)),
-                                    option_price=float(round(price, 2)),
-                                    quantity=float(qty),
-                                    intrinsic=float(round(intr, 2)),
-                                    time_value=float(round(tv, 2)),
-                                    annual_tv_pct=float(round(atv, 2)),
-                                    cash_flow=float(round(-cost, 2)),
-                                    equity_after=float(round(cash, 2)),
-                                    data_source=src,
-                                    iv_used=float(round(iv, 4)) if iv else None,
-                                    note=f"买入CALL, 年化TV%={atv:.2f}%, "
-                                         f"到期{expiry}, {(expiry-today).days}天",
-                                ).model_dump())
-
-                                print(f"[LEAPS终极] OPEN K={strike}, spot={spot:.0f}, "
-                                      f"price={price:.2f}, annual_TV%={atv:.2f}%, "
-                                      f"expiry={expiry}")
+                            # 检查是否超过开仓年化TV%限制
+                            if atv > config.max_open_annual_tv_pct:
+                                scan_entry["selected_strike"] = float(round(strike, 2))
+                                scan_entry["selected_expiry"] = expiry.isoformat()
+                                scan_entry["result"] = (
+                                    f"年化TV%={atv:.2f}% > 开仓限制{config.max_open_annual_tv_pct}%, 保持空仓"
+                                )
+                                print(f"[LEAPS终极] {today}: K={strike} 年化TV%={atv:.2f}% "
+                                      f"> 限制{config.max_open_annual_tv_pct}%, 跳过开仓")
                             else:
-                                scan_entry["result"] = f"资金不足(需${cost:.2f}, 有${cash:.2f})"
-                                print(f"[LEAPS终极] 资金不足: need ${cost:.2f}, have ${cash:.2f}, "
-                                      f"price={price:.2f}, qty={qty}, mult={mult}")
+                                scan_entry["selected_strike"] = float(round(strike, 2))
+                                scan_entry["selected_expiry"] = expiry.isoformat()
+                                cost = price * qty * mult
+                                print(f"[LEAPS终极] {today}: 选中 K={strike}, price={price:.2f}, "
+                                      f"cost={cost:.2f}, cash={cash:.2f}, qty={qty}, mult={mult}")
+                                scan_entry["result"] = f"开仓(cost=${cost:.2f})"
+                                if cost <= cash and cost > 0:
+                                    cash -= cost
+                                    position = {
+                                        "strike": strike, "expiry": expiry, "quantity": qty,
+                                        "open_price": float(price), "open_spot": spot,
+                                        "open_date": today, "iv_used": iv, "data_source": src,
+                                    }
+
+                                    trades.append(TradeRecord(
+                                        date=today.isoformat(), action="OPEN",
+                                        strike=float(round(strike, 2)),
+                                        expiry=expiry.isoformat(),
+                                        spot=float(round(spot, 2)),
+                                        option_price=float(round(price, 2)),
+                                        quantity=float(qty),
+                                        intrinsic=float(round(intr, 2)),
+                                        time_value=float(round(tv, 2)),
+                                        annual_tv_pct=float(round(atv, 2)),
+                                        cash_flow=float(round(-cost, 2)),
+                                        equity_after=float(round(cash, 2)),
+                                        data_source=src,
+                                        iv_used=float(round(iv, 4)) if iv else None,
+                                        note=f"买入CALL, 年化TV%={atv:.2f}%, "
+                                             f"到期{expiry}, {(expiry-today).days}天",
+                                    ).model_dump())
+
+                                    print(f"[LEAPS终极] OPEN K={strike}, spot={spot:.0f}, "
+                                          f"price={price:.2f}, annual_TV%={atv:.2f}%, "
+                                          f"expiry={expiry}")
+                                else:
+                                    scan_entry["result"] = f"资金不足(需${cost:.2f}, 有${cash:.2f})"
+                                    print(f"[LEAPS终极] 资金不足: need ${cost:.2f}, have ${cash:.2f}, "
+                                          f"price={price:.2f}, qty={qty}, mult={mult}")
                         else:
                             scan_entry["result"] = "未找到满足条件的合约"
                             print(f"[LEAPS终极] {today}: 未找到满足条件的合约")
@@ -747,6 +758,7 @@ class BacktestRequest(BaseModel):
     initial_capital: float = Field(default=100000)
     contract_multiplier: float = Field(default=0.01)
     max_annual_tv_pct: float = Field(default=10.0)
+    max_open_annual_tv_pct: float = Field(default=16.0)
     min_expiry_months: int = Field(default=12)
     close_days_before: int = Field(default=30)
     quantity: float = Field(default=1.0)
@@ -768,6 +780,7 @@ async def leaps_ultimate_stream(req: BacktestRequest):
         initial_capital=req.initial_capital,
         contract_multiplier=req.contract_multiplier,
         max_annual_tv_pct=req.max_annual_tv_pct,
+        max_open_annual_tv_pct=req.max_open_annual_tv_pct,
         min_expiry_months=req.min_expiry_months,
         close_days_before=req.close_days_before,
         quantity=req.quantity,

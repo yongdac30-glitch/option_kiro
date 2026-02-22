@@ -246,12 +246,15 @@ class USLeapsConfig(BaseModel):
     end_date: date
     initial_capital: float = Field(default=100000)
     max_annual_tv_pct: float = Field(default=10.0, description="最大年化TV%")
+    max_open_annual_tv_pct: float = Field(default=16.0, description="开仓年化TV%限制，超过则保持空仓")
     min_expiry_months: int = Field(default=12)
     close_days_before: int = Field(default=30)
     num_contracts: int = Field(default=1, description="每次买入合约数")
     num_strikes: int = Field(default=15, description="扫描行权价数量")
     open_interval_days: int = Field(default=30)
     default_iv: float = Field(default=0.3, description="回测默认IV")
+    use_dynamic_iv: bool = Field(default=False, description="使用动态IV（滚动30日历史波动率）")
+    dynamic_iv_window: int = Field(default=30, description="动态IV滚动窗口天数")
     enable_roll: bool = Field(default=False, description="是否启用换仓逻辑")
     roll_annual_tv_pct: float = Field(default=8.0, description="换仓年化TV差值阈值%")
 
@@ -323,6 +326,56 @@ def _find_best_us_expiry(today: date, min_months: int) -> Optional[date]:
     return expiries[-1] if expiries else None
 
 
+# ── Dynamic IV: rolling historical volatility ────────────────────────
+
+def _build_dynamic_iv_map(price_map: Dict[date, float], window: int = 30) -> Dict[date, float]:
+    """Compute rolling historical volatility (annualized) from daily close prices.
+
+    For each date, uses the past `window` trading days of log returns to estimate
+    annualized volatility, which serves as a proxy for implied volatility.
+    """
+    dates_sorted = sorted(price_map.keys())
+    prices = [price_map[d] for d in dates_sorted]
+
+    # Compute daily log returns
+    log_returns = []
+    for i in range(1, len(prices)):
+        if prices[i] > 0 and prices[i - 1] > 0:
+            log_returns.append(math.log(prices[i] / prices[i - 1]))
+        else:
+            log_returns.append(0.0)
+
+    iv_map: Dict[date, float] = {}
+    for i in range(len(dates_sorted)):
+        # log_returns[i-1] corresponds to return from dates_sorted[i-1] to dates_sorted[i]
+        # For date at index i, we want returns ending at index i
+        end_ret_idx = i  # return index = date index - 1, but we need returns up to this date
+        # returns indices 0..len-1 correspond to dates indices 1..len
+        # so for date index i, the latest return is at index i-1
+        if i < 1:
+            iv_map[dates_sorted[i]] = 0.3  # fallback
+            continue
+
+        start_ret_idx = max(0, i - window)
+        end_ret_idx = i  # exclusive upper bound for returns slice
+        window_returns = log_returns[start_ret_idx:end_ret_idx]
+
+        if len(window_returns) < 5:
+            iv_map[dates_sorted[i]] = 0.3  # not enough data, fallback
+            continue
+
+        mean_r = sum(window_returns) / len(window_returns)
+        var_r = sum((r - mean_r) ** 2 for r in window_returns) / (len(window_returns) - 1)
+        daily_vol = math.sqrt(var_r) if var_r > 0 else 0.0
+        annualized_vol = daily_vol * math.sqrt(252)  # 252 trading days
+
+        # Clamp to reasonable range
+        annualized_vol = max(0.05, min(annualized_vol, 3.0))
+        iv_map[dates_sorted[i]] = round(annualized_vol, 4)
+
+    return iv_map
+
+
 # ── Core backtest engine (BS model) ─────────────────────────────────
 
 async def run_us_leaps_backtest(
@@ -340,6 +393,17 @@ async def run_us_leaps_backtest(
     iv = config.default_iv
     _total = [len(dates)]
 
+    # Build dynamic IV map if enabled
+    dynamic_iv_map: Optional[Dict[date, float]] = None
+    if config.use_dynamic_iv:
+        dynamic_iv_map = _build_dynamic_iv_map(price_map, config.dynamic_iv_window)
+
+    def _get_iv(today: date) -> float:
+        """Get IV for a given date: dynamic or fixed."""
+        if dynamic_iv_map is not None and today in dynamic_iv_map:
+            return dynamic_iv_map[today]
+        return iv
+
     cash = config.initial_capital
     position = None
     trades = []
@@ -354,8 +418,10 @@ async def run_us_leaps_backtest(
         T = calculate_time_to_expiration(expiry, today)
         if T <= 0.0001:
             return float(max(0, spot - strike)), "intrinsic"
-        price = black_scholes_price(spot, strike, T, US_RISK_FREE_RATE, iv, "CALL")
-        return float(price), "BS模型"
+        current_iv = _get_iv(today)
+        price = black_scholes_price(spot, strike, T, US_RISK_FREE_RATE, current_iv, "CALL")
+        src = f"BS(IV={current_iv:.2f})" if dynamic_iv_map is not None else "BS模型"
+        return float(price), src
 
     def _scan_strikes(today, spot, expiry):
         """Scan from ATM downward, return (best, scanned_list)."""
@@ -463,6 +529,16 @@ async def run_us_leaps_backtest(
             for i in range(config.num_strikes + 1):
                 far_strike = atm - i * step
                 if far_strike <= 0:
+                    continue
+                # 不允许换到行权价更低的合约
+                if far_strike < cur_strike:
+                    roll_scanned.append({
+                        "strike": float(far_strike),
+                        "expiry": far_expiry.isoformat(),
+                        "price": 0, "far_tv": 0, "cur_tv": float(round(cur_tv, 2)),
+                        "tv_diff": 0, "annual_roll_cost": None,
+                        "selected": False, "note": f"行权价低于当前持仓K={cur_strike}",
+                    })
                     continue
 
                 far_price, far_src = _bs_price(spot, far_strike, far_expiry, today)
@@ -664,39 +740,46 @@ async def run_us_leaps_backtest(
 
                     if best is not None:
                         strike, price, atv, intr, tv = best
-                        cost_per_contract = price * mult
-                        cost = cost_per_contract * qty
-                        scan_entry["selected_strike"] = float(round(strike, 2))
-
-                        # 如果资金不足以买指定数量，自动减少合约数
-                        actual_qty = qty
-                        if cost > cash and cost_per_contract > 0:
-                            actual_qty = int(cash / cost_per_contract)
-                            cost = cost_per_contract * actual_qty
-
-                        if actual_qty > 0 and cost <= cash and cost > 0:
-                            cash -= cost
-                            position = {
-                                "strike": strike, "expiry": expiry,
-                                "quantity": actual_qty, "open_price": float(price),
-                                "open_date": today,
-                            }
-                            qty_note = f"(原计划{qty}张,实际{actual_qty}张)" if actual_qty != qty else ""
-                            trades.append({
-                                "date": today.isoformat(), "action": "OPEN",
-                                "strike": float(round(strike, 2)),
-                                "expiry": expiry.isoformat(),
-                                "spot": float(round(spot, 2)),
-                                "option_price": float(round(price, 2)),
-                                "quantity": actual_qty,
-                                "cash_flow": float(round(-cost, 2)),
-                                "equity_after": float(round(cash, 2)),
-                                "data_source": "BS模型",
-                                "note": f"买入CALL{qty_note}, 年化TV%={atv:.2f}%, 到期{expiry}",
-                            })
-                            scan_entry["result"] = f"开仓({actual_qty}张, cost=${cost:.2f})"
+                        # 检查是否超过开仓年化TV%限制
+                        if atv > config.max_open_annual_tv_pct:
+                            scan_entry["selected_strike"] = float(round(strike, 2))
+                            scan_entry["result"] = (
+                                f"年化TV%={atv:.2f}% > 开仓限制{config.max_open_annual_tv_pct}%, 保持空仓"
+                            )
                         else:
-                            scan_entry["result"] = f"资金不足(需${cost_per_contract:.2f}/张, 有${cash:.2f})"
+                            cost_per_contract = price * mult
+                            cost = cost_per_contract * qty
+                            scan_entry["selected_strike"] = float(round(strike, 2))
+
+                            # 如果资金不足以买指定数量，自动减少合约数
+                            actual_qty = qty
+                            if cost > cash and cost_per_contract > 0:
+                                actual_qty = int(cash / cost_per_contract)
+                                cost = cost_per_contract * actual_qty
+
+                            if actual_qty > 0 and cost <= cash and cost > 0:
+                                cash -= cost
+                                position = {
+                                    "strike": strike, "expiry": expiry,
+                                    "quantity": actual_qty, "open_price": float(price),
+                                    "open_date": today,
+                                }
+                                qty_note = f"(原计划{qty}张,实际{actual_qty}张)" if actual_qty != qty else ""
+                                trades.append({
+                                    "date": today.isoformat(), "action": "OPEN",
+                                    "strike": float(round(strike, 2)),
+                                    "expiry": expiry.isoformat(),
+                                    "spot": float(round(spot, 2)),
+                                    "option_price": float(round(price, 2)),
+                                    "quantity": actual_qty,
+                                    "cash_flow": float(round(-cost, 2)),
+                                    "equity_after": float(round(cash, 2)),
+                                    "data_source": "BS模型",
+                                    "note": f"买入CALL{qty_note}, 年化TV%={atv:.2f}%, 到期{expiry}",
+                                })
+                                scan_entry["result"] = f"开仓({actual_qty}张, cost=${cost:.2f})"
+                            else:
+                                scan_entry["result"] = f"资金不足(需${cost_per_contract:.2f}/张, 有${cash:.2f})"
                     else:
                         scan_entry["result"] = "未找到合约"
 
@@ -715,6 +798,7 @@ async def run_us_leaps_backtest(
             "cash": float(round(cash, 2)),
             "holdings": float(round(holdings, 2)),
             "has_position": position is not None,
+            "iv": float(round(_get_iv(today), 4)) if dynamic_iv_map is not None else None,
         })
 
     # Close remaining
@@ -809,7 +893,9 @@ async def run_us_leaps_backtest(
         "close_count": sum(1 for t in trades if t["action"] == "CLOSE"),
         "roll_count": roll_count,
         "backtest_days": days_total,
-        "default_iv": float(iv),
+        "default_iv": float(iv) if not config.use_dynamic_iv else "dynamic",
+        "use_dynamic_iv": config.use_dynamic_iv,
+        "dynamic_iv_window": config.dynamic_iv_window if config.use_dynamic_iv else None,
         "sharpe_ratio": float(round(strategy_sharpe, 3)),
         "spot_sharpe_ratio": float(round(spot_sharpe, 3)),
         "spot_return_pct": float(round(spot_return_pct, 2)),
@@ -831,12 +917,15 @@ class BacktestRequest(BaseModel):
     end_date: date
     initial_capital: float = Field(default=100000)
     max_annual_tv_pct: float = Field(default=10.0)
+    max_open_annual_tv_pct: float = Field(default=16.0)
     min_expiry_months: int = Field(default=12)
     close_days_before: int = Field(default=30)
     num_contracts: int = Field(default=1)
     num_strikes: int = Field(default=15)
     open_interval_days: int = Field(default=30)
     default_iv: float = Field(default=0.3)
+    use_dynamic_iv: bool = Field(default=False)
+    dynamic_iv_window: int = Field(default=30)
     enable_roll: bool = Field(default=False)
     roll_annual_tv_pct: float = Field(default=8.0)
 
@@ -853,12 +942,15 @@ async def us_leaps_stream(req: BacktestRequest):
         end_date=req.end_date,
         initial_capital=req.initial_capital,
         max_annual_tv_pct=req.max_annual_tv_pct,
+        max_open_annual_tv_pct=req.max_open_annual_tv_pct,
         min_expiry_months=req.min_expiry_months,
         close_days_before=req.close_days_before,
         num_contracts=req.num_contracts,
         num_strikes=req.num_strikes,
         open_interval_days=req.open_interval_days,
         default_iv=req.default_iv,
+        use_dynamic_iv=req.use_dynamic_iv,
+        dynamic_iv_window=req.dynamic_iv_window,
         enable_roll=req.enable_roll,
         roll_annual_tv_pct=req.roll_annual_tv_pct,
     )
