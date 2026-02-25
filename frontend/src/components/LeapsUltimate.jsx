@@ -8,11 +8,12 @@ import { useState, useRef } from 'react';
 import {
   Layout, Card, Form, Select, InputNumber, DatePicker, Button,
   Row, Col, Typography, Space, Table, Tag, Statistic, Divider,
-  message, Progress, Switch, Alert, Collapse,
+  message, Progress, Switch, Alert, Collapse, Tooltip as ATooltip,
 } from 'antd';
 import {
   ArrowLeftOutlined, CrownOutlined, InfoCircleOutlined,
   LineChartOutlined, StopOutlined, DatabaseOutlined, SearchOutlined,
+  BarChartOutlined,
 } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import dayjs from 'dayjs';
@@ -26,8 +27,8 @@ const { Header: AntHeader, Content, Footer } = Layout;
 const { Title, Text } = Typography;
 const { Option } = Select;
 
-const ACTION_COLORS = { OPEN: '#1890ff', CLOSE: '#8c8c8c', ROLL: '#faad14' };
-const ACTION_LABELS = { OPEN: '买入', CLOSE: '平仓', ROLL: '滚动' };
+const ACTION_COLORS = { OPEN: '#1890ff', CLOSE: '#8c8c8c', ROLL: '#faad14', MTM: '#2f54eb' };
+const ACTION_LABELS = { OPEN: '买入', CLOSE: '平仓', ROLL: '滚动', MTM: '盯市' };
 
 export default function LeapsUltimate() {
   const [form] = Form.useForm();
@@ -38,6 +39,7 @@ export default function LeapsUltimate() {
   const abortRef = useRef(null);
   const [liveScan, setLiveScan] = useState(null);
   const [liveLoading, setLiveLoading] = useState(false);
+  const [showMtm, setShowMtm] = useState(true);
 
   const handleStop = () => {
     if (abortRef.current) {
@@ -155,7 +157,9 @@ export default function LeapsUltimate() {
         </Tag>
       ) : <Tag>模拟</Tag>,
     },
-    { title: '备注', dataIndex: 'note', key: 'note', ellipsis: true },
+    { title: '备注', dataIndex: 'note', key: 'note', width: 300,
+      ellipsis: { showTitle: false },
+      render: (v) => v ? <ATooltip title={v} placement="topLeft"><span>{v}</span></ATooltip> : '-' },
   ];
 
   return (
@@ -216,7 +220,7 @@ export default function LeapsUltimate() {
                 start_date: dayjs('2023-01-01'),
                 end_date: dayjs(),
                 initial_capital: 100000,
-                contract_multiplier: 0.01,
+                contract_multiplier: 1,
                 max_annual_tv_pct: 10,
                 max_open_annual_tv_pct: 16,
                 min_expiry_months: 12,
@@ -319,7 +323,7 @@ export default function LeapsUltimate() {
                 </Col>
                 <Col xs={24} sm={6}>
                   <Form.Item name="open_interval_days" label="开仓检查间隔(天)">
-                    <InputNumber style={{ width: '100%' }} min={7} max={90} step={7} />
+                    <InputNumber style={{ width: '100%' }} min={1} max={90} step={1} />
                   </Form.Item>
                 </Col>
               </Row>
@@ -441,12 +445,45 @@ export default function LeapsUltimate() {
                 </ResponsiveContainer>
               </Card>
 
-              <Card title="交易记录" style={{ marginTop: 16 }}>
+              {result.equity_curve.length > 0 && (
+                <Card title={<Space><BarChartOutlined /><span>资金利用率走势</span></Space>}
+                  style={{ marginTop: 16 }}>
+                  <ResponsiveContainer width="100%" height={260}>
+                    <ComposedChart data={result.equity_curve}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="date" tick={{ fontSize: 11 }} interval="preserveStartEnd"
+                        tickFormatter={(v) => v.substring(5)} />
+                      <YAxis yAxisId="usage" tick={{ fontSize: 11 }} domain={[0, 100]}
+                        tickFormatter={(v) => `${v}%`} />
+                      <Tooltip formatter={(value, name) => {
+                        if (name === '资金利用率') return [`${value}%`, name];
+                        if (name === '持仓市值') return ['$' + value.toLocaleString(), name];
+                        return [value, name];
+                      }} />
+                      <Legend />
+                      <ReferenceLine yAxisId="usage" y={80} stroke="#cf1322" strokeDasharray="4 2" label="80%" />
+                      <ReferenceLine yAxisId="usage" y={50} stroke="#faad14" strokeDasharray="4 2" label="50%" />
+                      <Area yAxisId="usage" type="monotone" dataKey="capital_usage_pct" name="资金利用率"
+                        stroke="#722ed1" fill="#722ed120" strokeWidth={2} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </Card>
+              )}
+
+              <Card title={
+                <Space>
+                  <span>交易记录 ({result.trades.filter(t => t.action !== 'MTM').length}笔, 含{result.trades.filter(t => t.action === 'MTM').length}条盯市)</span>
+                </Space>
+              } style={{ marginTop: 16 }}>
+                <div style={{ marginBottom: 8 }}>
+                  <Switch checked={showMtm} onChange={setShowMtm} size="small" />
+                  <span style={{ marginLeft: 6, fontSize: 12 }}>显示逐日盯市</span>
+                </div>
                 <Table
                   columns={tradeColumns}
-                  dataSource={result.trades.map((t, i) => ({ ...t, key: i }))}
+                  dataSource={(showMtm ? result.trades : result.trades.filter(t => t.action !== 'MTM')).map((t, i) => ({ ...t, key: i }))}
                   size="small"
-                  pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
+                  pagination={{ pageSize: 30, showSizeChanger: true, pageSizeOptions: [30, 50, 100, 200], showTotal: (t) => `共 ${t} 条` }}
                   scroll={{ x: 1500 }}
                 />
               </Card>

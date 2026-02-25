@@ -257,7 +257,7 @@ async def collect_data_stream(req: CollectRequest):
                 from app.api.deribit import (
                     fetch_deribit_index_prices, fetch_iv_smile,
                     find_deribit_expiry, is_cached_no_data,
-                    get_cached_iv_smile,
+                    get_cached_iv_smile, find_all_deribit_expiries,
                 )
 
                 price_map = await fetch_deribit_index_prices(
@@ -293,13 +293,11 @@ async def collect_data_stream(req: CollectRequest):
                             if not spot or spot <= 0:
                                 continue
 
-                            # Find next 1-2 monthly expiries
-                            expiries = set()
-                            for m in range(1, 3):
-                                expiries.add(find_deribit_expiry(td, m))
-                            expiries = sorted(
-                                e for e in expiries if e > td
-                            )
+                            # Find all valid Deribit expiries for this date
+                            expiries = find_all_deribit_expiries(td)
+                            # Limit: skip expiries > 2 years out to avoid too many requests
+                            max_expiry = td + timedelta(days=730)
+                            expiries = [e for e in expiries if e <= max_expiry]
 
                             day_had_error = False
                             for expiry in expiries:
@@ -319,7 +317,7 @@ async def collect_data_stream(req: CollectRequest):
                                         smile = await fetch_iv_smile(
                                             client, underlying, expiry,
                                             spot, opt_type, td,
-                                            num_strikes=7,
+                                            num_strikes=11,
                                         )
                                         iv_count += len(smile)
                                         consecutive_errors = 0
@@ -814,3 +812,447 @@ async def test_proxy():
         except Exception as e:
             results[label] = {"ok": False, "error": str(e)}
     return results
+
+
+# ── Sentinel analysis & retry ────────────────────────────────────────
+
+@router.get("/sentinels/detail")
+async def get_sentinel_details(underlying: Optional[str] = None):
+    """获取所有无数据标记(sentinel)的详细信息，分析可能的原因。"""
+    from app.api.deribit import last_friday_of_month
+    db = SessionLocal()
+    try:
+        query = db.query(DeribitIVCache).filter(DeribitIVCache.strike == -1)
+        if underlying:
+            query = query.filter(DeribitIVCache.underlying == underlying)
+        rows = query.order_by(
+            DeribitIVCache.underlying,
+            DeribitIVCache.expiry_date,
+            DeribitIVCache.target_date,
+        ).all()
+
+        sentinels = []
+        for r in rows:
+            # Analyze: is the expiry a valid Deribit expiry?
+            exp = r.expiry_date
+            year, month = exp.year, exp.month
+            actual_last_fri = last_friday_of_month(year, month)
+
+            # Deribit quarterly months
+            quarterly_months = {3, 6, 9, 12}
+            is_quarterly = month in quarterly_months
+            is_last_friday = exp == actual_last_fri
+
+            # Days between target_date and expiry
+            days_to_expiry = (exp - r.target_date).days
+
+            # Possible reasons
+            reasons = []
+            if not is_last_friday:
+                reasons.append(f"到期日{exp}不是当月最后一个周五({actual_last_fri})")
+            if days_to_expiry < 0:
+                reasons.append(f"查询日{r.target_date}在到期日之后")
+            elif days_to_expiry < 7:
+                reasons.append(f"查询日距到期仅{days_to_expiry}天，合约可能已下架")
+            if not is_quarterly and days_to_expiry > 90:
+                reasons.append(f"非季度到期月({month}月)，超过3个月的月度合约可能不存在")
+
+            # Check if there's real IV data for the same expiry (different dates)
+            has_real_data = db.query(DeribitIVCache).filter(
+                DeribitIVCache.underlying == r.underlying,
+                DeribitIVCache.expiry_date == exp,
+                DeribitIVCache.strike > 0,
+            ).first() is not None
+
+            if has_real_data:
+                reasons.append("同一到期日有其他日期的真实数据，可能仅该查询日无数据")
+
+            if not reasons:
+                reasons.append("到期日格式正确，可能是该日期确实无交易数据")
+
+            sentinels.append({
+                "id": r.id,
+                "underlying": r.underlying,
+                "expiry_date": exp.isoformat(),
+                "option_type": r.option_type,
+                "target_date": r.target_date.isoformat(),
+                "spot_price": r.spot_price,
+                "days_to_expiry": days_to_expiry,
+                "is_last_friday": is_last_friday,
+                "actual_last_friday": actual_last_fri.isoformat(),
+                "is_quarterly": is_quarterly,
+                "has_real_data_same_expiry": has_real_data,
+                "reasons": reasons,
+            })
+
+        # Group summary
+        by_expiry = {}
+        for s in sentinels:
+            key = f"{s['underlying']}-{s['expiry_date']}"
+            if key not in by_expiry:
+                by_expiry[key] = {"count": 0, "reasons": set()}
+            by_expiry[key]["count"] += 1
+            for r in s["reasons"]:
+                by_expiry[key]["reasons"].add(r)
+
+        summary = [
+            {"key": k, "count": v["count"], "reasons": list(v["reasons"])}
+            for k, v in by_expiry.items()
+        ]
+
+        return {
+            "total": len(sentinels),
+            "sentinels": sentinels,
+            "summary_by_expiry": summary,
+        }
+    finally:
+        db.close()
+
+
+@router.get("/data-availability")
+async def get_data_availability(
+    underlying: str = "BTC",
+    target_date: Optional[str] = None,
+    option_type: str = "PUT",
+):
+    """获取指定 target_date 的数据可得性矩阵 (strike × expiry)。
+    返回所有 expiry_date 和 strike 的组合，标记每个格子的状态:
+    - real: 有真实IV数据 (strike > 0)
+    - estimated: 通过IV微笑曲线插值估算
+    - no_data: 有sentinel标记 (strike == -1) 或完全无数据
+    """
+    from app.api.deribit import (
+        find_all_deribit_expiries, get_strike_step, find_nearest_strike,
+        interpolate_iv_at_strike, last_friday_of_month,
+    )
+    from app.services.pricing import (
+        black_scholes_price, calculate_time_to_expiration,
+    )
+    RISK_FREE_RATE = 0.05
+
+    db = SessionLocal()
+    try:
+        # If no target_date, get the list of available target_dates
+        if not target_date:
+            dates = db.query(distinct(DeribitIVCache.target_date)).filter(
+                DeribitIVCache.underlying == underlying,
+            ).order_by(DeribitIVCache.target_date.desc()).limit(500).all()
+            return {
+                "target_dates": [d[0].isoformat() for d in dates],
+                "message": "请选择一个target_date",
+            }
+
+        td = date.fromisoformat(target_date)
+
+        # Get all real IV data for this target_date
+        real_rows = db.query(
+            DeribitIVCache.expiry_date,
+            DeribitIVCache.strike,
+            DeribitIVCache.iv,
+            DeribitIVCache.trade_price_usd,
+            DeribitIVCache.spot_price,
+            DeribitIVCache.instrument,
+        ).filter(
+            DeribitIVCache.underlying == underlying,
+            DeribitIVCache.target_date == td,
+            DeribitIVCache.option_type == option_type,
+            DeribitIVCache.strike > 0,
+        ).all()
+
+        # Get sentinel rows for this target_date
+        sentinel_rows = db.query(
+            DeribitIVCache.expiry_date,
+        ).filter(
+            DeribitIVCache.underlying == underlying,
+            DeribitIVCache.target_date == td,
+            DeribitIVCache.strike == -1,
+            DeribitIVCache.option_type == option_type,
+        ).all()
+        sentinel_expiries = set(r.expiry_date for r in sentinel_rows)
+
+        # Determine spot price
+        spot = real_rows[0].spot_price if real_rows else None
+        if not spot:
+            # Try to get spot from price cache
+            from app.models.deribit_cache import DeribitPriceCache
+            price_row = db.query(DeribitPriceCache).filter(
+                DeribitPriceCache.underlying == underlying,
+                DeribitPriceCache.trade_date == td,
+            ).first()
+            if price_row:
+                spot = price_row.close_price
+
+        if not spot:
+            return {
+                "underlying": underlying,
+                "target_date": target_date,
+                "option_type": option_type,
+                "expiries": [],
+                "strikes": [],
+                "cells": [],
+                "summary": {"total": 0, "real": 0, "estimated": 0, "no_data": 0},
+                "error": "该日期无现货价格数据",
+            }
+
+        # Build data map: (expiry, strike) -> {iv, price, spot, instrument}
+        data_map = {}
+        real_expiry_set = set()
+        real_strike_set = set()
+        # Also build per-expiry smile: expiry -> [(strike, iv), ...]
+        smile_by_expiry = {}
+        for r in real_rows:
+            real_expiry_set.add(r.expiry_date)
+            real_strike_set.add(r.strike)
+            data_map[(r.expiry_date, r.strike)] = {
+                "iv": r.iv,
+                "price_usd": r.trade_price_usd,
+                "spot": r.spot_price,
+                "instrument": r.instrument,
+            }
+            if r.expiry_date not in smile_by_expiry:
+                smile_by_expiry[r.expiry_date] = []
+            smile_by_expiry[r.expiry_date].append((r.strike, r.iv))
+
+        # Generate full expiry grid using Deribit rules
+        all_expiries = find_all_deribit_expiries(td)
+        # Limit to 2 years out
+        max_expiry_date = td + timedelta(days=730)
+        all_expiries = [e for e in all_expiries if e <= max_expiry_date]
+        # Also include any expiries from real data or sentinels that might not be in the generated list
+        for exp in real_expiry_set:
+            if exp not in all_expiries and exp > td:
+                all_expiries.append(exp)
+        for exp in sentinel_expiries:
+            if exp not in all_expiries and exp > td:
+                all_expiries.append(exp)
+        all_expiries = sorted(set(all_expiries))
+
+        # Generate full strike grid based on spot price
+        step = get_strike_step(underlying, spot)
+        atm_strike = find_nearest_strike(spot, step)
+        # Generate strikes: 15 steps below ATM to 15 steps above ATM
+        num_steps = 15
+        all_strikes = []
+        for i in range(-num_steps, num_steps + 1):
+            s = atm_strike + i * step
+            if s > 0:
+                all_strikes.append(s)
+        # Also include any strikes from real data
+        for s in real_strike_set:
+            if s not in all_strikes:
+                all_strikes.append(s)
+        all_strikes = sorted(set(all_strikes))
+
+        # Build cells with interpolation
+        cells = []
+        real_count = 0
+        estimated_count = 0
+        no_data_count = 0
+
+        for exp in all_expiries:
+            is_sentinel = exp in sentinel_expiries
+            has_real = exp in smile_by_expiry and len(smile_by_expiry[exp]) >= 2
+            smile = smile_by_expiry.get(exp, [])
+
+            T = calculate_time_to_expiration(exp, td)
+
+            for strike in all_strikes:
+                key = (exp, strike)
+                if key in data_map:
+                    d = data_map[key]
+                    cells.append({
+                        "expiry": exp.isoformat(),
+                        "strike": strike,
+                        "status": "real",
+                        "iv": d["iv"],
+                        "price_usd": d["price_usd"],
+                        "spot": d["spot"],
+                        "instrument": d["instrument"],
+                    })
+                    real_count += 1
+                elif has_real and T > 0.001:
+                    # Try to interpolate from the IV smile of this expiry
+                    iv_est = interpolate_iv_at_strike(smile, strike)
+                    if iv_est and 0.01 < iv_est < 5.0:
+                        price_est = black_scholes_price(
+                            spot, strike, T, RISK_FREE_RATE, iv_est, option_type
+                        )
+                        cells.append({
+                            "expiry": exp.isoformat(),
+                            "strike": strike,
+                            "status": "estimated",
+                            "iv": round(iv_est, 6),
+                            "price_usd": round(float(price_est), 2),
+                            "spot": spot,
+                        })
+                        estimated_count += 1
+                    else:
+                        cells.append({
+                            "expiry": exp.isoformat(),
+                            "strike": strike,
+                            "status": "no_data",
+                        })
+                        no_data_count += 1
+                else:
+                    info = None
+                    if is_sentinel:
+                        info = "sentinel"
+                    cells.append({
+                        "expiry": exp.isoformat(),
+                        "strike": strike,
+                        "status": "no_data",
+                        "info": info,
+                    })
+                    no_data_count += 1
+
+        return {
+            "underlying": underlying,
+            "target_date": target_date,
+            "option_type": option_type,
+            "spot_price": spot,
+            "expiries": [e.isoformat() for e in all_expiries],
+            "strikes": all_strikes,
+            "cells": cells,
+            "summary": {
+                "total": real_count + estimated_count + no_data_count,
+                "real": real_count,
+                "estimated": estimated_count,
+                "no_data": no_data_count,
+            },
+        }
+    finally:
+        db.close()
+
+
+@router.get("/data-availability/dates")
+async def get_availability_dates(underlying: str = "BTC"):
+    """获取有IV数据的所有target_date列表，从2019年1月开始。"""
+    db = SessionLocal()
+    try:
+        min_date = date(2019, 1, 1)
+        dates = db.query(distinct(DeribitIVCache.target_date)).filter(
+            DeribitIVCache.underlying == underlying,
+            DeribitIVCache.target_date >= min_date,
+        ).order_by(DeribitIVCache.target_date.desc()).limit(2000).all()
+        return {
+            "underlying": underlying,
+            "dates": [d[0].isoformat() for d in dates],
+            "count": len(dates),
+        }
+    finally:
+        db.close()
+
+
+class RetryRequest(BaseModel):
+    sentinel_ids: List[int] = Field(..., description="要重试的sentinel记录ID列表")
+
+
+@router.post("/sentinels/retry-stream")
+async def retry_sentinels_stream(req: RetryRequest):
+    """删除指定的sentinel标记并重新尝试获取IV数据（SSE流式）。"""
+    from app.api.deribit import fetch_iv_smile, get_cached_iv_smile
+
+    async def event_generator():
+        db = SessionLocal()
+        try:
+            # Load sentinel records
+            rows = db.query(DeribitIVCache).filter(
+                DeribitIVCache.id.in_(req.sentinel_ids),
+                DeribitIVCache.strike == -1,
+            ).all()
+
+            if not rows:
+                yield f"data: {json.dumps({'type': 'error', 'message': '未找到指定的sentinel记录'})}\n\n"
+                yield 'data: {"type": "done"}\n\n'
+                return
+
+            total = len(rows)
+            yield f"data: {json.dumps({'type': 'progress', 'pct': 0, 'message': f'准备重试 {total} 条记录...'})}\n\n"
+
+            # Collect info and delete sentinels
+            retry_items = []
+            for r in rows:
+                retry_items.append({
+                    "underlying": r.underlying,
+                    "expiry_date": r.expiry_date,
+                    "option_type": r.option_type,
+                    "target_date": r.target_date,
+                    "spot_price": r.spot_price,
+                })
+                db.delete(r)
+
+            # Also clear related collection logs so retry_count resets
+            for item in retry_items:
+                db.query(DataCollectionLog).filter(
+                    DataCollectionLog.source == "deribit",
+                    DataCollectionLog.data_type == "iv_smile",
+                    DataCollectionLog.underlying == item["underlying"],
+                    DataCollectionLog.target_date == item["target_date"],
+                    DataCollectionLog.expiry_date == item["expiry_date"],
+                    DataCollectionLog.option_type == item["option_type"],
+                ).delete()
+
+            db.commit()
+        finally:
+            db.close()
+
+        yield f"data: {json.dumps({'type': 'progress', 'pct': 5, 'message': f'已清除 {total} 条sentinel，开始重新获取...'})}\n\n"
+
+        success_count = 0
+        fail_count = 0
+        results = []
+
+        try:
+            async with create_http_client() as client:
+                for idx, item in enumerate(retry_items):
+                    pct = 5 + int(90 * (idx + 1) / total)
+                    try:
+                        smile = await fetch_iv_smile(
+                            client,
+                            item["underlying"],
+                            item["expiry_date"],
+                            item["spot_price"],
+                            item["option_type"],
+                            item["target_date"],
+                            num_strikes=7,
+                        )
+                        if smile:
+                            success_count += 1
+                            results.append({
+                                "expiry": item["expiry_date"].isoformat(),
+                                "target": item["target_date"].isoformat(),
+                                "type": item["option_type"],
+                                "status": "success",
+                                "points": len(smile),
+                            })
+                        else:
+                            fail_count += 1
+                            results.append({
+                                "expiry": item["expiry_date"].isoformat(),
+                                "target": item["target_date"].isoformat(),
+                                "type": item["option_type"],
+                                "status": "no_data",
+                                "points": 0,
+                            })
+                    except Exception as e:
+                        fail_count += 1
+                        results.append({
+                            "expiry": item["expiry_date"].isoformat(),
+                            "target": item["target_date"].isoformat(),
+                            "type": item["option_type"],
+                            "status": "error",
+                            "error": str(e),
+                        })
+
+                    if (idx + 1) % 3 == 0 or idx == total - 1:
+                        yield f"data: {json.dumps({'type': 'progress', 'pct': pct, 'message': f'进度 {idx+1}/{total}, 成功{success_count}, 失败{fail_count}'})}\n\n"
+
+                    await asyncio.sleep(0.3)
+
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'重试过程出错: {str(e)}'})}\n\n"
+
+        yield f"data: {json.dumps({'type': 'result', 'data': {'total': total, 'success': success_count, 'fail': fail_count, 'results': results}})}\n\n"
+        yield 'data: {"type": "done"}\n\n'
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

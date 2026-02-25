@@ -1,7 +1,7 @@
 """QQQ LEAPS 逢跌买入策略回测 API
 
 策略逻辑：
-- 开仓条件：QQQ 单日跌幅 ≥ dip_threshold（默认1%）
+- 开仓条件：标的单日跌幅 ≥ dip_threshold（默认1%）
 - 开仓合约：买入到期日约 expiry_months（默认24）个月后、Delta 最接近 target_delta（默认0.60）的 CALL
 - 止盈/平仓规则（阶梯式）：
   - 0~4个月：期权价格涨至开仓价 × (1 + tp_pct_1)（默认+50%）止盈
@@ -10,7 +10,7 @@
   - 超过 max_hold_months（默认9）个月：强制平仓
 - 支持同时持有多笔仓位（每次跌幅触发独立开仓）
 
-数据来源: Yahoo Finance REST API
+数据来源: Yahoo Finance (美股ETF) / OKX (BTC, ETH)
 期权定价: Black-Scholes 模型
 """
 from fastapi import APIRouter, HTTPException
@@ -28,10 +28,21 @@ from app.core.config import create_http_client
 router = APIRouter(prefix="/api/qqq-leaps", tags=["qqq-leaps"])
 
 RISK_FREE_RATE = 0.045
-CONTRACT_MULT = 100
+
+# Crypto tickers use OKX data, contract multiplier = 1 (1 BTC/ETH per contract)
+CRYPTO_TICKERS = {"BTC", "ETH"}
 
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
+
+
+def _is_crypto(ticker: str) -> bool:
+    return ticker.upper() in CRYPTO_TICKERS
+
+
+def _contract_mult(ticker: str) -> int:
+    """Crypto options: 1 unit per contract. US equity options: 100 shares."""
+    return 1 if _is_crypto(ticker) else 100
 
 
 async def _fetch_yahoo_prices(ticker: str, start: date, end: date) -> Dict[date, float]:
@@ -88,9 +99,23 @@ async def _fetch_yahoo_prices(ticker: str, start: date, end: date) -> Dict[date,
     raise ValueError(f"获取 {ticker} 数据失败(重试3次): {last_error}")
 
 
+async def _fetch_okx_prices(ticker: str, start: date, end: date) -> Dict[date, float]:
+    """Fetch daily close prices for BTC/ETH from OKX (DB cache first, then API)."""
+    from app.api.data_center import _fetch_okx_prices_with_cache
+    inst_id = f"{ticker.upper()}-USD"
+    return await _fetch_okx_prices_with_cache(inst_id, start, end)
+
+
+async def _fetch_prices(ticker: str, start: date, end: date) -> Dict[date, float]:
+    """Unified price fetcher: OKX for crypto, Yahoo for US equities."""
+    if _is_crypto(ticker):
+        return await _fetch_okx_prices(ticker, start, end)
+    return await _fetch_yahoo_prices(ticker, start, end)
+
+
 # ── Expiry & strike helpers ──────────────────────────────────────────
 
-def _generate_expiries(today: date) -> List[date]:
+def _generate_expiries_us(today: date) -> List[date]:
     """Generate plausible US option expiry dates (3rd Friday of month)."""
     import calendar
     results = []
@@ -107,16 +132,41 @@ def _generate_expiries(today: date) -> List[date]:
     return results
 
 
-def _find_expiry(today: date, min_days: int = 730) -> Optional[date]:
+def _generate_expiries_crypto(today: date) -> List[date]:
+    """Generate plausible crypto option expiry dates (last Friday of month)."""
+    import calendar
+    results = []
+    for year_offset in range(0, 4):
+        year = today.year + year_offset
+        for month in range(1, 13):
+            cal = calendar.monthcalendar(year, month)
+            fridays = [w[calendar.FRIDAY] for w in cal if w[calendar.FRIDAY] != 0]
+            if fridays:
+                exp = date(year, month, fridays[-1])
+                if exp > today:
+                    results.append(exp)
+    results.sort()
+    return results
+
+
+def _find_expiry(today: date, min_days: int = 730, is_crypto: bool = False) -> Optional[date]:
     """Find nearest expiry at least min_days away."""
     target = today + timedelta(days=min_days)
-    for exp in _generate_expiries(today):
+    expiries = _generate_expiries_crypto(today) if is_crypto else _generate_expiries_us(today)
+    for exp in expiries:
         if exp >= target:
             return exp
     return None
 
 
-def _strike_step(price: float) -> float:
+def _strike_step(price: float, is_crypto: bool = False) -> float:
+    if is_crypto:
+        if price < 500: return 25.0
+        if price < 2000: return 50.0
+        if price < 10000: return 500.0
+        if price < 50000: return 1000.0
+        return 5000.0
+    # US equities
     if price < 25: return 2.5
     if price < 200: return 5.0
     if price < 500: return 10.0
@@ -150,8 +200,13 @@ class QQQLeapsRequest(BaseModel):
 
 # ── Dynamic IV: rolling historical volatility ────────────────────────
 
-def _build_dynamic_iv_map(price_map: Dict[date, float], window: int = 30) -> Dict[date, float]:
-    """Compute rolling historical volatility (annualized) from daily close prices."""
+def _build_dynamic_iv_map(price_map: Dict[date, float], window: int = 30,
+                          trading_days_per_year: int = 252) -> Dict[date, float]:
+    """Compute rolling historical volatility (annualized) from daily close prices.
+    
+    Args:
+        trading_days_per_year: 252 for US equities, 365 for crypto (24/7 markets).
+    """
     dates_sorted = sorted(price_map.keys())
     prices = [price_map[d] for d in dates_sorted]
 
@@ -175,7 +230,7 @@ def _build_dynamic_iv_map(price_map: Dict[date, float], window: int = 30) -> Dic
         mean_r = sum(window_returns) / len(window_returns)
         var_r = sum((r - mean_r) ** 2 for r in window_returns) / (len(window_returns) - 1)
         daily_vol = math.sqrt(var_r) if var_r > 0 else 0.0
-        annualized_vol = daily_vol * math.sqrt(252)
+        annualized_vol = daily_vol * math.sqrt(trading_days_per_year)
         annualized_vol = max(0.05, min(annualized_vol, 3.0))
         iv_map[dates_sorted[i]] = round(annualized_vol, 4)
 
@@ -195,11 +250,13 @@ async def run_qqq_leaps_backtest(
         raise HTTPException(status_code=400, detail="No price data")
 
     iv = config.default_iv
-    mult = CONTRACT_MULT
+    is_crypto_ticker = _is_crypto(config.ticker)
+    mult = _contract_mult(config.ticker)
     qty = config.num_contracts
 
-    # Build rolling historical IV map
-    dynamic_iv_map = _build_dynamic_iv_map(price_map, 30)
+    # Build rolling historical IV map (crypto: 365 trading days, equities: 252)
+    iv_annualize_days = 365 if is_crypto_ticker else 252
+    dynamic_iv_map = _build_dynamic_iv_map(price_map, 30, iv_annualize_days)
 
     def _get_iv(today: date) -> float:
         """Get rolling 30-day historical volatility for a given date."""
@@ -208,6 +265,7 @@ async def run_qqq_leaps_backtest(
         return iv  # fallback to default
 
     cash = config.initial_capital
+    realized_pnl = 0.0  # 累计已实现盈亏
     positions = []  # list of open positions
     trades = []
     equity_curve = []
@@ -234,12 +292,13 @@ async def run_qqq_leaps_backtest(
 
     def _find_strike_for_delta(spot, expiry, today, target_delta):
         """Find strike giving approximately target_delta."""
-        step = _strike_step(spot)
+        step = _strike_step(spot, is_crypto_ticker)
         atm = _nearest_strike(spot, step)
         best_strike = atm
         best_diff = 999.0
-        # Scan from OTM to deep ITM
-        for i in range(-10, 40):
+        # Scan from OTM to deep ITM — wider range for crypto
+        scan_range = 60 if is_crypto_ticker else 40
+        for i in range(-15, scan_range):
             strike = atm - i * step
             if strike <= 0:
                 continue
@@ -288,6 +347,7 @@ async def run_qqq_leaps_backtest(
                 proceeds = cur_price * pos["quantity"] * mult
                 pnl = (cur_price - pos["open_price"]) * pos["quantity"] * mult
                 cash += proceeds
+                realized_pnl += pnl
                 trades.append({
                     "date": today.isoformat(), "action": "FORCE_CLOSE",
                     "strike": round(pos["strike"], 2),
@@ -311,6 +371,7 @@ async def run_qqq_leaps_backtest(
                 proceeds = cur_price * pos["quantity"] * mult
                 pnl = (cur_price - pos["open_price"]) * pos["quantity"] * mult
                 cash += proceeds
+                realized_pnl += pnl
                 tp_label = _get_tp_label(pos, today)
                 trades.append({
                     "date": today.isoformat(), "action": "TAKE_PROFIT",
@@ -336,7 +397,7 @@ async def run_qqq_leaps_backtest(
         if prev_spot is not None and prev_spot > 0:
             daily_change_pct = (spot - prev_spot) / prev_spot * 100
             if daily_change_pct <= -config.dip_threshold and cash > 0 and len(positions) < config.max_positions:
-                expiry = _find_expiry(today, config.expiry_months * 30)
+                expiry = _find_expiry(today, config.expiry_months * 30, is_crypto_ticker)
                 if expiry:
                     strike = _find_strike_for_delta(spot, expiry, today, config.target_delta)
                     price = _bs(spot, strike, expiry, today)
@@ -380,15 +441,20 @@ async def run_qqq_leaps_backtest(
                             "note": f"跌{daily_change_pct:.2f}%触发, 资金不足(需${cost:.0f}, 有${cash:.0f})",
                         })
 
+        # Compute daily change % before updating prev_spot
+        day_chg = round((spot - prev_spot) / prev_spot * 100, 2) if prev_spot and prev_spot > 0 and day_idx > 0 else 0
         prev_spot = spot
 
-        # 3) Mark-to-market all positions
+        # 3) Mark-to-market all positions — 用仓位和期权价格计算权益
         holdings = 0.0
+        unrealized_pnl = 0.0
         for pos in positions:
             mtm = _bs(spot, pos["strike"], pos["expiry"], today)
-            holdings += mtm * pos["quantity"] * mult
+            pos_value = mtm * pos["quantity"] * mult
+            holdings += pos_value
+            unrealized_pnl += (mtm - pos["open_price"]) * pos["quantity"] * mult
 
-        total_equity = cash + holdings
+        total_equity = config.initial_capital + realized_pnl + unrealized_pnl
         capital_usage_pct = round(holdings / total_equity * 100, 1) if total_equity > 0 else 0.0
 
         # Attach capital_usage_pct to all trades that happened today
@@ -396,16 +462,44 @@ async def run_qqq_leaps_backtest(
             if t["date"] == today.isoformat() and "capital_usage_pct" not in t:
                 t["capital_usage_pct"] = capital_usage_pct
 
+        # 4) Generate daily MTM records for each open position (skip open day)
+        for pos in positions:
+            if pos["open_date"] == today:
+                continue  # 开仓当天已有OPEN记录，不重复生成MTM
+            mtm_price = _bs(spot, pos["strike"], pos["expiry"], today)
+            pos_pnl = (mtm_price - pos["open_price"]) * pos["quantity"] * mult
+            pos_pnl_pct = (mtm_price / pos["open_price"] - 1) * 100 if pos["open_price"] > 0 else 0
+            months_held = (today - pos["open_date"]).days / 30.0
+            tp_target = _get_tp_target(pos, today)
+            tp_label = _get_tp_label(pos, today)
+            trades.append({
+                "date": today.isoformat(), "action": "MTM",
+                "strike": round(pos["strike"], 2),
+                "expiry": pos["expiry"].isoformat(),
+                "spot": round(spot, 2),
+                "option_price": round(mtm_price, 2),
+                "quantity": pos["quantity"],
+                "cash_flow": 0,
+                "pnl": round(pos_pnl, 2),
+                "pnl_pct": round(pos_pnl_pct, 2),
+                "delta": round(_bs_delta(spot, pos["strike"], pos["expiry"], today), 3),
+                "months_held": round(months_held, 1),
+                "capital_usage_pct": capital_usage_pct,
+                "note": f"开仓价{pos['open_price']:.2f}, 止盈目标{tp_label}={tp_target:.2f}",
+            })
+
         equity_curve.append({
             "date": today.isoformat(),
-            "equity": round(cash + holdings, 2),
+            "equity": round(total_equity, 2),
             "spot": round(spot, 2),
             "cash": round(cash, 2),
             "holdings": round(holdings, 2),
+            "unrealized_pnl": round(unrealized_pnl, 2),
+            "realized_pnl": round(realized_pnl, 2),
             "num_positions": len(positions),
             "capital_usage_pct": capital_usage_pct,
             "iv": round(_get_iv(today), 4),
-            "daily_change_pct": round((spot - prev_spot) / prev_spot * 100, 2) if prev_spot and prev_spot > 0 and day_idx > 0 else 0,
+            "daily_change_pct": day_chg,
         })
 
     # Close remaining positions
@@ -418,6 +512,7 @@ async def run_qqq_leaps_backtest(
             pnl = (cp - pos["open_price"]) * pos["quantity"] * mult
             months_held = (last - pos["open_date"]).days / 30.0
             cash += proceeds
+            realized_pnl += pnl
             trades.append({
                 "date": last.isoformat(), "action": "CLOSE",
                 "strike": round(pos["strike"], 2),
@@ -428,18 +523,22 @@ async def run_qqq_leaps_backtest(
                 "cash_flow": round(proceeds, 2),
                 "pnl": round(pnl, 2),
                 "pnl_pct": round((cp / pos["open_price"] - 1) * 100, 2) if pos["open_price"] > 0 else 0,
-                "delta": 0, "months_held": round(months_held, 1),
+                "delta": round(_bs_delta(last_spot, pos["strike"], pos["expiry"], last), 3),
+                "months_held": round(months_held, 1),
                 "capital_usage_pct": 0,
-                "note": f"回测结束平仓, 持仓{months_held:.1f}月",
+                "note": f"回测结束平仓, 持仓{months_held:.1f}月, PnL=${pnl:.2f}",
             })
         positions = []
         if equity_curve:
-            equity_curve[-1]["equity"] = round(cash, 2)
+            final_eq = config.initial_capital + realized_pnl
+            equity_curve[-1]["equity"] = round(final_eq, 2)
             equity_curve[-1]["holdings"] = 0.0
+            equity_curve[-1]["unrealized_pnl"] = 0.0
+            equity_curve[-1]["realized_pnl"] = round(realized_pnl, 2)
             equity_curve[-1]["num_positions"] = 0
 
     # Summary
-    final_equity = cash
+    final_equity = config.initial_capital + realized_pnl
     total_pnl = final_equity - config.initial_capital
     days_total = (dates[-1] - dates[0]).days if len(dates) > 1 else 1
     years = max(days_total / 365.25, 0.01)
@@ -455,7 +554,7 @@ async def run_qqq_leaps_backtest(
     ann_ret = ((final_equity / config.initial_capital) ** (1 / years) - 1) * 100 if final_equity > 0 else -100.0
     return_pct = total_pnl / config.initial_capital * 100
 
-    # Sharpe
+    # Sharpe (crypto: 365 trading days, equities: 252)
     strategy_sharpe = 0.0
     if len(equity_curve) >= 2:
         rets = []
@@ -469,7 +568,7 @@ async def run_qqq_leaps_backtest(
             var_r = sum((r - mean_r) ** 2 for r in rets) / (len(rets) - 1)
             std_r = math.sqrt(var_r) if var_r > 0 else 0.0
             if std_r > 0:
-                strategy_sharpe = (mean_r / std_r) * math.sqrt(252)
+                strategy_sharpe = (mean_r / std_r) * math.sqrt(iv_annualize_days)
 
     # B&H comparison
     bh_start = equity_curve[0]["spot"] if equity_curve else 1
@@ -508,7 +607,7 @@ async def run_qqq_leaps_backtest(
         "force_close_count": fc_count,
         "skip_count": skip_count,
         "win_rate": round(win_rate, 1),
-        "total_trades": len(trades),
+        "total_trades": sum(1 for t in trades if t["action"] != "MTM"),
         "backtest_days": days_total,
         "default_iv": iv,
         "iv_mode": "动态(30日滚动)",
@@ -534,7 +633,7 @@ async def qqq_leaps_stream(req: QQQLeapsRequest):
         yield f"data: {json.dumps({'type': 'progress', 'pct': 0, 'status': f'正在获取 {req.ticker} 历史价格...'})}\n\n"
 
         try:
-            price_map = await _fetch_yahoo_prices(req.ticker, req.start_date, req.end_date)
+            price_map = await _fetch_prices(req.ticker, req.start_date, req.end_date)
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': f'获取{req.ticker}价格失败: {str(e)}'})}\n\n"
             return
@@ -587,7 +686,7 @@ async def qqq_leaps_stream(req: QQQLeapsRequest):
                 continue
             yield f"data: {json.dumps({'type': 'progress', 'pct': 92, 'status': f'获取对比标的 {ct} 数据...'})}\n\n"
             try:
-                cp = await _fetch_yahoo_prices(ct, req.start_date, req.end_date)
+                cp = await _fetch_prices(ct, req.start_date, req.end_date)
                 if cp:
                     sorted_dates = sorted(cp.keys())
                     first_price = cp[sorted_dates[0]]
@@ -621,7 +720,7 @@ async def etf_compare(
     results = {}
     for t in ticker_list:
         try:
-            prices = await _fetch_yahoo_prices(t, start, end)
+            prices = await _fetch_prices(t, start, end)
             if prices:
                 sorted_d = sorted(prices.keys())
                 first = prices[sorted_d[0]]

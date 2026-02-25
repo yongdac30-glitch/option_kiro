@@ -164,4 +164,62 @@ export const dataCenterService = {
     const resp = await api.get('/api/data-center/proxy/test');
     return resp.data;
   },
+
+  /** 获取数据可得性矩阵 */
+  async getDataAvailability(underlying, targetDate, optionType) {
+    const params = { underlying };
+    if (targetDate) params.target_date = targetDate;
+    if (optionType) params.option_type = optionType;
+    const resp = await api.get('/api/data-center/data-availability', { params });
+    return resp.data;
+  },
+
+  /** 获取有IV数据的target_date列表 */
+  async getAvailabilityDates(underlying) {
+    const resp = await api.get('/api/data-center/data-availability/dates', { params: { underlying } });
+    return resp.data;
+  },
+
+  /** 获取sentinel详情 */
+  async getSentinelDetails(underlying) {
+    const params = {};
+    if (underlying) params.underlying = underlying;
+    const resp = await api.get('/api/data-center/sentinels/detail', { params });
+    return resp.data;
+  },
+
+  /** 重试sentinel（SSE流式） */
+  retrySentinelsStream(sentinelIds, onProgress, onResult, onError) {
+    const controller = new AbortController();
+    fetch(`${API_BASE_URL}/api/data-center/sentinels/retry-stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sentinel_ids: sentinelIds }),
+      signal: controller.signal,
+    }).then(async (response) => {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const msg = JSON.parse(line.slice(6));
+              if (msg.type === 'progress') onProgress(msg);
+              else if (msg.type === 'result') onResult(msg.data);
+              else if (msg.type === 'error') onError(msg.message);
+            } catch (e) { /* ignore */ }
+          }
+        }
+      }
+    }).catch((err) => {
+      if (err.name !== 'AbortError') onError(err.message);
+    });
+    return controller;
+  },
 };

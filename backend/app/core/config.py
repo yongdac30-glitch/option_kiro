@@ -2,7 +2,11 @@
 from pydantic_settings import BaseSettings
 from typing import List, Optional
 import os
+import json
 import httpx
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROXY_STATE_FILE = os.path.join(_PROJECT_ROOT, ".proxy_state.json")
 
 
 class Settings(BaseSettings):
@@ -32,9 +36,45 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# ── Runtime proxy state (can be toggled via API without restart) ──
-_proxy_enabled: bool = True
-_proxy_url: str = settings.PROXY_URL or "socks5://127.0.0.1:10808"
+# ── Runtime proxy state (persisted to .proxy_state.json) ──
+
+def _load_proxy_state() -> dict:
+    """Load proxy state from disk. Returns defaults if file missing."""
+    try:
+        if os.path.exists(_PROXY_STATE_FILE):
+            with open(_PROXY_STATE_FILE, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {"enabled": True, "url": settings.PROXY_URL or "socks5://127.0.0.1:10808"}
+
+
+def _save_proxy_state(enabled: bool, url: str):
+    """Persist proxy state to disk."""
+    try:
+        with open(_PROXY_STATE_FILE, "w") as f:
+            json.dump({"enabled": enabled, "url": url}, f)
+    except Exception as e:
+        print(f"[Config] Failed to save proxy state: {e}")
+
+
+_initial_state = _load_proxy_state()
+_proxy_enabled: bool = _initial_state.get("enabled", True)
+_proxy_url: str = _initial_state.get("url", settings.PROXY_URL or "socks5://127.0.0.1:10808")
+
+
+def apply_proxy_env():
+    """Set HTTP_PROXY/HTTPS_PROXY env vars based on current proxy state."""
+    if _proxy_enabled and _proxy_url:
+        os.environ["HTTP_PROXY"] = _proxy_url
+        os.environ["HTTPS_PROXY"] = _proxy_url
+    else:
+        os.environ.pop("HTTP_PROXY", None)
+        os.environ.pop("HTTPS_PROXY", None)
+
+
+# Apply env vars on startup based on persisted state
+apply_proxy_env()
 
 
 def set_proxy(enabled: bool, url: Optional[str] = None):
@@ -42,7 +82,7 @@ def set_proxy(enabled: bool, url: Optional[str] = None):
     _proxy_enabled = enabled
     if url:
         _proxy_url = url
-    # Also update env vars for libraries that read proxy from env (yfinance/requests)
+    _save_proxy_state(_proxy_enabled, _proxy_url)
     apply_proxy_env()
 
 
@@ -72,16 +112,3 @@ def create_http_client(
         kwargs["proxy"] = _proxy_url
     
     return httpx.AsyncClient(**kwargs)
-
-
-def apply_proxy_env():
-    """Set HTTP_PROXY/HTTPS_PROXY env vars based on current proxy state.
-    
-    Call this before using libraries that read proxy from env (e.g. yfinance/requests).
-    """
-    if _proxy_enabled and _proxy_url:
-        os.environ["HTTP_PROXY"] = _proxy_url
-        os.environ["HTTPS_PROXY"] = _proxy_url
-    else:
-        os.environ.pop("HTTP_PROXY", None)
-        os.environ.pop("HTTPS_PROXY", None)

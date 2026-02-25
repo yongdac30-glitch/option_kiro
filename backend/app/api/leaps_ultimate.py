@@ -135,7 +135,7 @@ class LeapsUltimateConfig(BaseModel):
     start_date: date
     end_date: date
     initial_capital: float = Field(default=100000, description="初始资金 USD")
-    contract_multiplier: float = Field(default=0.01, description="合约乘数")
+    contract_multiplier: float = Field(default=1.0, description="合约乘数")
 
     # 核心筛选参数
     max_annual_tv_pct: float = Field(default=10.0, description="最大年化时间价值%")
@@ -607,24 +607,59 @@ async def run_leaps_ultimate(
 
             # ── 3) Mark-to-market ──
             holdings = 0.0
+            mtm_price_val = 0.0
             if position is not None:
                 T = calculate_time_to_expiration(position["expiry"], today)
                 if T > 0.0001:
                     iv_mtm = position.get("iv_used") or 0.6
-                    mtm_price = black_scholes_price(spot, position["strike"], T,
-                                                     RISK_FREE_RATE, iv_mtm, "CALL")
-                    holdings = float(mtm_price * position["quantity"] * mult)
+                    mtm_price_val = black_scholes_price(spot, position["strike"], T,
+                                                         RISK_FREE_RATE, iv_mtm, "CALL")
+                    holdings = float(mtm_price_val * position["quantity"] * mult)
                 else:
-                    holdings = float(max(0, spot - position["strike"]) * position["quantity"] * mult)
+                    mtm_price_val = float(max(0, spot - position["strike"]))
+                    holdings = float(mtm_price_val * position["quantity"] * mult)
+
+            total_equity = cash + holdings
+            capital_usage_pct = round(holdings / total_equity * 100, 1) if total_equity > 0 else 0.0
 
             equity_curve.append({
                 "date": today.isoformat(),
-                "equity": float(round(cash + holdings, 2)),
+                "equity": float(round(total_equity, 2)),
                 "spot": float(spot),
                 "cash": float(round(cash, 2)),
                 "holdings": float(round(holdings, 2)),
                 "has_position": position is not None,
+                "capital_usage_pct": capital_usage_pct,
             })
+
+            # ── 4) Generate MTM trade record (skip open/close day) ──
+            if position is not None and position["open_date"] != today:
+                pnl_mtm = (mtm_price_val - position["open_price"]) * position["quantity"] * mult
+                pnl_pct_mtm = (mtm_price_val / position["open_price"] - 1) * 100 if position["open_price"] > 0 else 0
+                intrinsic_mtm = max(0.0, spot - position["strike"])
+                tv_mtm = max(0.0, mtm_price_val - intrinsic_mtm)
+                days_left_mtm = max((position["expiry"] - today).days, 1)
+                days_held_mtm = (today - position["open_date"]).days
+                annual_tv_mtm = (tv_mtm / position["strike"]) * (365.0 / days_left_mtm) * 100.0
+
+                trades.append(TradeRecord(
+                    date=today.isoformat(), action="MTM",
+                    strike=float(round(position["strike"], 2)),
+                    expiry=position["expiry"].isoformat(),
+                    spot=float(round(spot, 2)),
+                    option_price=float(round(mtm_price_val, 2)),
+                    quantity=float(position["quantity"]),
+                    intrinsic=float(round(intrinsic_mtm, 2)),
+                    time_value=float(round(tv_mtm, 2)),
+                    annual_tv_pct=float(round(annual_tv_mtm, 2)),
+                    cash_flow=0,
+                    equity_after=float(round(cash + holdings, 2)),
+                    data_source=position.get("data_source"),
+                    iv_used=float(round(position.get("iv_used") or 0.6, 4)),
+                    note=f"持仓{days_held_mtm}天, 剩余{days_left_mtm}天, "
+                         f"PnL=${pnl_mtm:.2f}({pnl_pct_mtm:+.1f}%), "
+                         f"年化TV%={annual_tv_mtm:.2f}%",
+                ).model_dump())
 
         # ── Close remaining position at end ──
         if position is not None and dates:
@@ -662,6 +697,7 @@ async def run_leaps_ultimate(
                 equity_curve[-1]["cash"] = float(round(cash, 2))
                 equity_curve[-1]["holdings"] = 0.0
                 equity_curve[-1]["has_position"] = False
+                equity_curve[-1]["capital_usage_pct"] = 0.0
 
     # ── Summary ──
     final_equity = cash
@@ -685,6 +721,7 @@ async def run_leaps_ultimate(
 
     open_count = sum(1 for t in trades if t.get("action") == "OPEN")
     close_count = sum(1 for t in trades if t.get("action") == "CLOSE")
+    mtm_count = sum(1 for t in trades if t.get("action") == "MTM")
 
     # ── Sharpe ratio calculation ──
     # Observation interval = open_interval_days, annualization factor = 365 / interval
@@ -735,7 +772,8 @@ async def run_leaps_ultimate(
         "total_return_pct": float(round(total_pnl / config.initial_capital * 100, 2)),
         "annualized_return_pct": float(round(ann_ret, 2)),
         "max_drawdown_pct": float(round(max_drawdown * 100, 2)),
-        "total_trades": len(trades),
+        "total_trades": sum(1 for t in trades if t.get("action") != "MTM"),
+        "mtm_count": mtm_count,
         "open_count": open_count,
         "close_count": close_count,
         "backtest_days": days,
@@ -756,7 +794,7 @@ class BacktestRequest(BaseModel):
     start_date: date
     end_date: date
     initial_capital: float = Field(default=100000)
-    contract_multiplier: float = Field(default=0.01)
+    contract_multiplier: float = Field(default=1.0)
     max_annual_tv_pct: float = Field(default=10.0)
     max_open_annual_tv_pct: float = Field(default=16.0)
     min_expiry_months: int = Field(default=12)

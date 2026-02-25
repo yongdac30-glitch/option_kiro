@@ -5,7 +5,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Layout, Card, Row, Col, Statistic, Button, Select, DatePicker,
   Table, Space, Tag, message, Progress, Typography, Popconfirm,
-  Tabs, Switch, InputNumber, Form, Modal,
+  Tabs, Switch, InputNumber, Form, Modal, Tooltip, Spin,
 } from 'antd';
 import {
   DatabaseOutlined, CloudDownloadOutlined, DeleteOutlined,
@@ -13,6 +13,7 @@ import {
   HomeOutlined, WarningOutlined, EditOutlined, SaveOutlined,
   CloseOutlined, FilterOutlined, ScissorOutlined, PauseCircleOutlined,
   ApiOutlined, CheckCircleOutlined, CloseCircleOutlined,
+  HeatMapOutlined,
 } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import dayjs from 'dayjs';
@@ -84,6 +85,22 @@ export default function DataCenter() {
   const [proxyLoading, setProxyLoading] = useState(false);
   const [proxyTestResult, setProxyTestResult] = useState(null);
   const [proxyTestLoading, setProxyTestLoading] = useState(false);
+
+  // Sentinel analysis
+  const [sentinelData, setSentinelData] = useState(null);
+  const [sentinelLoading, setSentinelLoading] = useState(false);
+  const [sentinelRetrying, setSentinelRetrying] = useState(false);
+  const [sentinelRetryProgress, setSentinelRetryProgress] = useState(null);
+  const [selectedSentinelIds, setSelectedSentinelIds] = useState([]);
+  const sentinelRetryRef = useRef(null);
+
+  // Data availability heatmap
+  const [heatmapDates, setHeatmapDates] = useState([]);
+  const [heatmapTargetDate, setHeatmapTargetDate] = useState(null);
+  const [heatmapOptionType, setHeatmapOptionType] = useState('PUT');
+  const [heatmapData, setHeatmapData] = useState(null);
+  const [heatmapLoading, setHeatmapLoading] = useState(false);
+  const [heatmapUnderlying, setHeatmapUnderlying] = useState('BTC');
 
   const loadStats = useCallback(async () => {
     setLoading(true);
@@ -285,7 +302,85 @@ export default function DataCenter() {
     catch (e) { message.error('清除失败'); }
   };
 
-  // ── IV columns ──
+  // ── Sentinel analysis ──
+  const loadSentinelDetails = async () => {
+    setSentinelLoading(true);
+    try {
+      const data = await dataCenterService.getSentinelDetails(underlying);
+      setSentinelData(data);
+      setSelectedSentinelIds([]);
+    } catch (e) {
+      message.error('加载sentinel详情失败: ' + e.message);
+    } finally {
+      setSentinelLoading(false);
+    }
+  };
+
+  const handleRetrySentinels = () => {
+    if (selectedSentinelIds.length === 0) { message.warning('请先选择要重试的记录'); return; }
+    setSentinelRetrying(true);
+    setSentinelRetryProgress({ pct: 0, message: '准备中...' });
+    const ctrl = dataCenterService.retrySentinelsStream(
+      selectedSentinelIds,
+      (prog) => setSentinelRetryProgress(prog),
+      (result) => {
+        message.success(`重试完成: 成功${result.success}, 失败${result.fail}`);
+        setSentinelRetrying(false);
+        setSentinelRetryProgress(null);
+        sentinelRetryRef.current = null;
+        loadSentinelDetails();
+        loadStats();
+      },
+      (err) => {
+        message.error('重试失败: ' + err);
+        setSentinelRetrying(false);
+        setSentinelRetryProgress(null);
+        sentinelRetryRef.current = null;
+      },
+    );
+    sentinelRetryRef.current = ctrl;
+  };
+
+  const handleStopRetry = () => {
+    if (sentinelRetryRef.current) {
+      sentinelRetryRef.current.abort();
+      sentinelRetryRef.current = null;
+    }
+    setSentinelRetrying(false);
+    setSentinelRetryProgress(null);
+    message.info('已停止重试');
+  };
+
+  // ── Data availability heatmap ──
+  const loadHeatmapDates = async (ul) => {
+    try {
+      const data = await dataCenterService.getAvailabilityDates(ul || heatmapUnderlying);
+      setHeatmapDates(data.dates || []);
+      if (data.dates?.length > 0 && !heatmapTargetDate) {
+        setHeatmapTargetDate(data.dates[0]);
+      }
+    } catch (e) {
+      message.error('加载日期列表失败');
+    }
+  };
+
+  const loadHeatmapData = async (td, ot, ul) => {
+    const targetDate = td || heatmapTargetDate;
+    if (!targetDate) { message.warning('请选择查询日期'); return; }
+    setHeatmapLoading(true);
+    try {
+      const data = await dataCenterService.getDataAvailability(
+        ul || heatmapUnderlying, targetDate, ot || heatmapOptionType
+      );
+      setHeatmapData(data);
+    } catch (e) {
+      message.error('加载数据可得性失败: ' + e.message);
+    } finally {
+      setHeatmapLoading(false);
+    }
+  };
+
+    // ── IV columns ──
   const ivColumns = [
     { title: '到期日', dataIndex: 'expiry_date', width: 100, fixed: 'left' },
     { title: '查询日', dataIndex: 'target_date', width: 100 },
@@ -635,6 +730,236 @@ export default function DataCenter() {
                     </Space>
                   </Card>
                 </Space>
+              ),
+            },
+            {
+              key: 'heatmap',
+              label: <span><HeatMapOutlined /> 数据可得性</span>,
+              children: (
+                <div>
+                  <Card size="small" style={{ marginBottom: 16, background: '#f6ffed', borderColor: '#b7eb8f' }}>
+                    <Row gutter={16} align="middle">
+                      <Col>
+                        <Select value={heatmapUnderlying} onChange={(v) => { setHeatmapUnderlying(v); setHeatmapDates([]); setHeatmapTargetDate(null); setHeatmapData(null); loadHeatmapDates(v); }}
+                          style={{ width: 100 }}
+                          options={[{ value: 'BTC', label: 'BTC' }, { value: 'ETH', label: 'ETH' }]} />
+                      </Col>
+                      <Col>
+                        <Button onClick={() => loadHeatmapDates()} icon={<ReloadOutlined />}>加载日期</Button>
+                      </Col>
+                      <Col>
+                        <Select
+                          value={heatmapTargetDate}
+                          onChange={(v) => { setHeatmapTargetDate(v); loadHeatmapData(v); }}
+                          style={{ width: 160 }}
+                          showSearch
+                          placeholder="选择查询日期"
+                          options={heatmapDates.map(d => ({ value: d, label: d }))}
+                        />
+                      </Col>
+                      <Col>
+                        <Select value={heatmapOptionType} onChange={(v) => { setHeatmapOptionType(v); if (heatmapTargetDate) loadHeatmapData(heatmapTargetDate, v); }}
+                          style={{ width: 100 }}
+                          options={[{ value: 'PUT', label: 'PUT' }, { value: 'CALL', label: 'CALL' }]} />
+                      </Col>
+                      <Col>
+                        <Button type="primary" icon={<ReloadOutlined />} onClick={() => loadHeatmapData()} loading={heatmapLoading}>查询</Button>
+                      </Col>
+                      {heatmapData?.summary && (
+                        <Col>
+                          <Space>
+                            <Tag color="green">真实: {heatmapData.summary.real}</Tag>
+                            <Tag color="gold">估算: {heatmapData.summary.estimated || 0}</Tag>
+                            <Tag color="red">无数据: {heatmapData.summary.no_data}</Tag>
+                            <Tag>总计: {heatmapData.summary.total}</Tag>
+                            {heatmapData.spot_price && <Tag color="blue">现货: ${Number(heatmapData.spot_price).toLocaleString()}</Tag>}
+                          </Space>
+                        </Col>
+                      )}
+                    </Row>
+                  </Card>
+
+                  {heatmapLoading && <div style={{ textAlign: 'center', padding: 40 }}><Spin size="large" /></div>}
+
+                  {heatmapData && !heatmapLoading && heatmapData.strikes?.length > 0 && (
+                    <Card size="small" title={`${heatmapData.underlying} ${heatmapData.option_type} 数据可得性 - ${heatmapData.target_date}`}>
+                      <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 600 }}>
+                        <table style={{ borderCollapse: 'collapse', fontSize: 11 }}>
+                          <thead>
+                            <tr>
+                              <th style={{ padding: '4px 8px', background: '#fafafa', border: '1px solid #e8e8e8', position: 'sticky', left: 0, zIndex: 2, minWidth: 80 }}>
+                                Strike \ Expiry
+                              </th>
+                              {heatmapData.expiries.map(exp => (
+                                <th key={exp} style={{ padding: '4px 6px', background: '#fafafa', border: '1px solid #e8e8e8', whiteSpace: 'nowrap', writingMode: 'vertical-lr', textOrientation: 'mixed', height: 80 }}>
+                                  {exp}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(() => {
+                              const cellMap = {};
+                              (heatmapData.cells || []).forEach(c => {
+                                cellMap[`${c.expiry}_${c.strike}`] = c;
+                              });
+                              return heatmapData.strikes.map(strike => {
+                              const isAtm = heatmapData.spot_price && Math.abs(strike - heatmapData.spot_price) / heatmapData.spot_price < 0.05;
+                              return (
+                                <tr key={strike}>
+                                  <td style={{ padding: '3px 8px', background: isAtm ? '#e6f7ff' : '#fafafa', border: '1px solid #e8e8e8', fontWeight: isAtm ? 'bold' : 'normal', position: 'sticky', left: 0, zIndex: 1, whiteSpace: 'nowrap' }}>
+                                    {Number(strike).toLocaleString()}
+                                    {isAtm && ' \u2605'}
+                                  </td>
+                                  {heatmapData.expiries.map(exp => {
+                                    const cell = cellMap[`${exp}_${strike}`];
+                                    const status = cell ? cell.status : 'no_data';
+                                    const bgColor = status === 'real' ? '#52c41a' : status === 'estimated' ? '#faad14' : status === 'no_data' ? '#cf1322' : '#d9d9d9';
+                                    const tipParts = [`${exp} / $${Number(strike).toLocaleString()}`];
+                                    if (cell?.iv) tipParts.push(`IV: ${(cell.iv * 100).toFixed(1)}%`);
+                                    if (cell?.price_usd) tipParts.push(`Price: $${Number(cell.price_usd).toFixed(2)}`);
+                                    if (status === 'estimated') tipParts.push('(插值估算)');
+                                    if (cell?.info) tipParts.push(cell.info);
+                                    const tip = tipParts.join('\n');
+                                    return (
+                                      <Tooltip key={`${exp}-${strike}`} title={<div style={{ whiteSpace: 'pre-line', fontSize: 11 }}>{tip}</div>}>
+                                        <td style={{ width: 20, height: 20, minWidth: 20, background: bgColor, border: '1px solid #e8e8e8', cursor: 'pointer' }} />
+                                      </Tooltip>
+                                    );
+                                  })}
+                                </tr>
+                              );
+                            });
+                            })()}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div style={{ marginTop: 12 }}>
+                        <Space>
+                          <span><span style={{ display: 'inline-block', width: 14, height: 14, background: '#52c41a', border: '1px solid #e8e8e8', verticalAlign: 'middle', marginRight: 4 }} />真实数据</span>
+                          <span><span style={{ display: 'inline-block', width: 14, height: 14, background: '#faad14', border: '1px solid #e8e8e8', verticalAlign: 'middle', marginRight: 4 }} />IV插值估算</span>
+                          <span><span style={{ display: 'inline-block', width: 14, height: 14, background: '#cf1322', border: '1px solid #e8e8e8', verticalAlign: 'middle', marginRight: 4 }} />无数据/Sentinel</span>
+                          <span><span style={{ display: 'inline-block', width: 14, height: 14, background: '#d9d9d9', border: '1px solid #e8e8e8', verticalAlign: 'middle', marginRight: 4 }} />无记录</span>
+                        </Space>
+                      </div>
+                    </Card>
+                  )}
+
+                  {heatmapData && !heatmapLoading && (!heatmapData.strikes || heatmapData.strikes.length === 0) && (
+                    <Card size="small">
+                      <Text type="secondary">该日期没有IV数据记录</Text>
+                    </Card>
+                  )}
+
+                  {!heatmapData && !heatmapLoading && (
+                    <Card size="small">
+                      <Text type="secondary">请先点击"加载日期"获取可用日期列表，然后选择日期查看数据可得性</Text>
+                    </Card>
+                  )}
+                </div>
+              ),
+            },
+            {
+              key: 'sentinels',
+              label: <span><WarningOutlined /> 无数据分析 ({sentinelData?.total || '?'})</span>,
+              children: (
+                <div>
+                  <Card size="small" style={{ marginBottom: 16, background: '#fffbe6', borderColor: '#ffe58f' }}>
+                    <Row gutter={16} align="middle">
+                      <Col>
+                        <Select value={underlying} onChange={setUnderlying} style={{ width: 100 }}
+                          options={[{ value: 'BTC', label: 'BTC' }, { value: 'ETH', label: 'ETH' }]} />
+                      </Col>
+                      <Col>
+                        <Button type="primary" icon={<ReloadOutlined />} onClick={loadSentinelDetails}
+                          loading={sentinelLoading}>加载分析</Button>
+                      </Col>
+                      <Col>
+                        <Button icon={<CloudDownloadOutlined />} onClick={handleRetrySentinels}
+                          loading={sentinelRetrying}
+                          disabled={selectedSentinelIds.length === 0}>
+                          重试选中 ({selectedSentinelIds.length})
+                        </Button>
+                      </Col>
+                      {sentinelRetrying && (
+                        <Col>
+                          <Button danger icon={<PauseCircleOutlined />} onClick={handleStopRetry}>停止</Button>
+                        </Col>
+                      )}
+                      <Col>
+                        <Button onClick={() => {
+                          if (sentinelData?.sentinels) setSelectedSentinelIds(sentinelData.sentinels.map(s => s.id));
+                        }} disabled={!sentinelData}>全选</Button>
+                      </Col>
+                      <Col>
+                        <Button onClick={() => setSelectedSentinelIds([])} disabled={selectedSentinelIds.length === 0}>取消全选</Button>
+                      </Col>
+                    </Row>
+                    {sentinelRetryProgress && (
+                      <div style={{ marginTop: 12 }}>
+                        <Progress percent={sentinelRetryProgress.pct || 0} status="active" />
+                        <Text type="secondary">{sentinelRetryProgress.message}</Text>
+                      </div>
+                    )}
+                  </Card>
+
+                  {sentinelData && sentinelData.summary_by_expiry?.length > 0 && (
+                    <Card size="small" title="按到期日汇总" style={{ marginBottom: 16 }}>
+                      <Table
+                        dataSource={sentinelData.summary_by_expiry.map((s, i) => ({ ...s, key: i }))}
+                        size="small" pagination={false}
+                        columns={[
+                          { title: '到期日', dataIndex: 'key', width: 160 },
+                          { title: '无数据条数', dataIndex: 'count', width: 100 },
+                          { title: '可能原因', dataIndex: 'reasons',
+                            render: (v) => v?.map((r, i) => <Tag key={i} color="orange" style={{ marginBottom: 2 }}>{r}</Tag>) },
+                        ]}
+                      />
+                    </Card>
+                  )}
+
+                  {sentinelData && (
+                    <Card size="small" title={`详细记录 (${sentinelData.total}条)`}>
+                      <Table
+                        dataSource={sentinelData.sentinels?.map(s => ({ ...s, key: s.id })) || []}
+                        size="small"
+                        pagination={{ pageSize: 30, showSizeChanger: true, pageSizeOptions: [30, 50, 100, 200] }}
+                        scroll={{ x: 1400, y: 500 }}
+                        rowSelection={{
+                          selectedRowKeys: selectedSentinelIds,
+                          onChange: (keys) => setSelectedSentinelIds(keys),
+                        }}
+                        columns={[
+                          { title: '标的', dataIndex: 'underlying', width: 60 },
+                          { title: '到期日', dataIndex: 'expiry_date', width: 100,
+                            render: (v, r) => <span style={{ color: r.is_last_friday ? '#389e0d' : '#cf1322' }}>{v}</span> },
+                          { title: '类型', dataIndex: 'option_type', width: 60,
+                            render: (v) => <Tag color={v === 'CALL' ? 'green' : 'red'}>{v}</Tag> },
+                          { title: '查询日', dataIndex: 'target_date', width: 100 },
+                          { title: '现货价', dataIndex: 'spot_price', width: 100,
+                            render: (v) => v ? `$${Number(v).toLocaleString()}` : '-' },
+                          { title: '距到期', dataIndex: 'days_to_expiry', width: 70,
+                            render: (v) => <span style={{ color: v < 0 ? '#cf1322' : v < 7 ? '#faad14' : '#389e0d' }}>{v}天</span> },
+                          { title: '最后周五', dataIndex: 'is_last_friday', width: 80,
+                            render: (v) => v ? <Tag color="green">是</Tag> : <Tag color="red">否</Tag> },
+                          { title: '实际最后周五', dataIndex: 'actual_last_friday', width: 110 },
+                          { title: '季度月', dataIndex: 'is_quarterly', width: 70,
+                            render: (v) => v ? <Tag color="blue">是</Tag> : <Tag>否</Tag> },
+                          { title: '同到期有数据', dataIndex: 'has_real_data_same_expiry', width: 100,
+                            render: (v) => v ? <Tag color="green">有</Tag> : <Tag color="orange">无</Tag> },
+                          { title: '可能原因', dataIndex: 'reasons', width: 300,
+                            render: (v) => v?.map((r, i) => <div key={i} style={{ fontSize: 11, color: '#8c8c8c' }}>{r}</div>) },
+                        ]}
+                      />
+                    </Card>
+                  )}
+
+                  {!sentinelData && !sentinelLoading && (
+                    <Card size="small">
+                      <Text type="secondary">点击"加载分析"查看无数据标记的详细信息和原因分析</Text>
+                    </Card>
+                  )}
+                </div>
               ),
             },
           ]} />

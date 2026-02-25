@@ -162,6 +162,45 @@ def find_deribit_quarterly_expiries(from_date: date, max_years_ahead: int = 3) -
     return expiries
 
 
+def find_all_deribit_expiries(target_date: date) -> List[date]:
+    """Generate ALL valid Deribit expiry dates visible from target_date.
+
+    Deribit expiry rules (approximate):
+    - Monthly expiries: last Friday of each month, available for the next ~6 months
+    - Quarterly expiries: last Friday of Mar/Jun/Sep/Dec, available up to ~2-3 years out
+    - (Weekly expiries exist but are very short-lived, we skip them for data collection)
+
+    Returns sorted list of expiry dates that are > target_date.
+    """
+    expiries = set()
+
+    # Monthly expiries: next 6 months
+    for m_offset in range(1, 7):
+        y = target_date.year
+        m = target_date.month + m_offset
+        while m > 12:
+            m -= 12
+            y += 1
+        exp = last_friday_of_month(y, m)
+        if exp > target_date:
+            expiries.add(exp)
+
+    # Quarterly expiries: up to 2.5 years out
+    quarterly_months = [3, 6, 9, 12]
+    for y in range(target_date.year, target_date.year + 3):
+        for m in quarterly_months:
+            exp = last_friday_of_month(y, m)
+            if exp > target_date:
+                expiries.add(exp)
+
+    # Also include the current month's expiry if it hasn't passed
+    current_exp = last_friday_of_month(target_date.year, target_date.month)
+    if current_exp > target_date:
+        expiries.add(current_exp)
+
+    return sorted(expiries)
+
+
 def format_deribit_date(d: date) -> str:
     return f"{d.day}{MONTH_ABBR[d.month]}{str(d.year)[2:]}"
 

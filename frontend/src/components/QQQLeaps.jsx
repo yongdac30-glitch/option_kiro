@@ -7,7 +7,7 @@ import { useState, useRef, useCallback } from 'react';
 import {
   Layout, Card, Row, Col, Button, Select, DatePicker, InputNumber,
   Table, Space, Tag, message, Progress, Typography, Statistic,
-  Descriptions, Tabs, Divider, Slider,
+  Descriptions, Tabs, Divider, Slider, Switch, Tooltip as ATooltip,
 } from 'antd';
 import {
   RocketOutlined, HomeOutlined, PlayCircleOutlined, PauseCircleOutlined,
@@ -32,7 +32,11 @@ const TICKERS = [
   { value: 'XLK', label: 'XLK (科技板块)' },
   { value: 'IWM', label: 'IWM (罗素2000)' },
   { value: 'DIA', label: 'DIA (道琼斯)' },
+  { value: 'BTC', label: 'BTC (比特币)' },
+  { value: 'ETH', label: 'ETH (以太坊)' },
 ];
+
+const CRYPTO_TICKERS = new Set(['BTC', 'ETH']);
 
 export default function QQQLeaps() {
   const [ticker, setTicker] = useState('QQQ');
@@ -51,6 +55,7 @@ export default function QQQLeaps() {
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(null);
   const [result, setResult] = useState(null);
+  const [showMtm, setShowMtm] = useState(true);
   const controllerRef = useRef(null);
 
   const handleRun = useCallback(() => {
@@ -59,6 +64,7 @@ export default function QQQLeaps() {
     setProgress({ pct: 0, status: '准备中...' });
     setResult(null);
 
+    const isCrypto = CRYPTO_TICKERS.has(ticker);
     const params = {
       ticker,
       start_date: dateRange[0].format('YYYY-MM-DD'),
@@ -73,7 +79,7 @@ export default function QQQLeaps() {
       tp_pct_3: tpPct3,
       max_hold_months: maxHoldMonths,
       max_positions: maxPositions,
-      compare_tickers: ['QQQ', 'SPY', 'XLK'],
+      compare_tickers: isCrypto ? ['BTC', 'ETH'] : ['QQQ', 'SPY', 'XLK'],
     };
 
     const ctrl = qqqLeapsService.backtestStream(
@@ -101,14 +107,14 @@ export default function QQQLeaps() {
     { title: '日期', dataIndex: 'date', width: 100, fixed: 'left' },
     { title: '操作', dataIndex: 'action', width: 100,
       render: (v) => {
-        const colors = { OPEN: 'green', CLOSE: 'red', TAKE_PROFIT: 'gold', FORCE_CLOSE: 'orange', SKIP: 'default' };
-        const labels = { OPEN: '开仓', CLOSE: '平仓', TAKE_PROFIT: '止盈', FORCE_CLOSE: '强平', SKIP: '跳过' };
+        const colors = { OPEN: 'green', CLOSE: 'red', TAKE_PROFIT: 'gold', FORCE_CLOSE: 'orange', SKIP: 'default', MTM: 'blue' };
+        const labels = { OPEN: '开仓', CLOSE: '平仓', TAKE_PROFIT: '止盈', FORCE_CLOSE: '强平', SKIP: '跳过', MTM: '盯市' };
         return <Tag color={colors[v]}>{labels[v] || v}</Tag>;
       },
     },
-    { title: '行权价', dataIndex: 'strike', width: 90, render: (v) => `$${v}` },
+    { title: '行权价', dataIndex: 'strike', width: 100, render: (v) => `$${v?.toLocaleString()}` },
     { title: '到期日', dataIndex: 'expiry', width: 100 },
-    { title: '现货', dataIndex: 'spot', width: 90, render: (v) => `$${v}` },
+    { title: '现货', dataIndex: 'spot', width: 100, render: (v) => `$${v?.toLocaleString()}` },
     { title: '期权价', dataIndex: 'option_price', width: 100, render: (v) => `$${v?.toFixed(2)}` },
     { title: 'Delta', dataIndex: 'delta', width: 70, render: (v) => v?.toFixed(3) },
     { title: '数量', dataIndex: 'quantity', width: 60 },
@@ -121,14 +127,16 @@ export default function QQQLeaps() {
     { title: '持仓月', dataIndex: 'months_held', width: 70, render: (v) => v ? `${v}月` : '-' },
     { title: '资金利用率', dataIndex: 'capital_usage_pct', width: 90,
       render: (v) => v != null ? <Text style={{ color: v > 80 ? '#cf1322' : v > 50 ? '#faad14' : '#3f8600' }}>{v}%</Text> : '-' },
-    { title: '说明', dataIndex: 'note', ellipsis: true },
+    { title: '说明', dataIndex: 'note', width: 320,
+      ellipsis: { showTitle: false },
+      render: (v) => v ? <ATooltip title={v} placement="topLeft"><span>{v}</span></ATooltip> : '-' },
   ];
 
   return (
     <Layout style={{ minHeight: '100vh', background: '#f0f2f5' }}>
       <div style={{ background: '#001529', padding: '0 24px', display: 'flex', alignItems: 'center', height: 64 }}>
         <RocketOutlined style={{ fontSize: 24, color: '#eb2f96', marginRight: 12 }} />
-        <Title level={3} style={{ color: 'white', margin: 0, fontSize: 20 }}>QQQ LEAPS 逢跌买入策略</Title>
+        <Title level={3} style={{ color: 'white', margin: 0, fontSize: 20 }}>LEAPS 逢跌买入策略</Title>
         <div style={{ flex: 1 }} />
         <Link to="/" style={{ color: '#ffffffb3', display: 'flex', alignItems: 'center', gap: 6 }}>
           <HomeOutlined /> 返回主页
@@ -145,6 +153,7 @@ export default function QQQLeaps() {
               <li>阶梯止盈：0-4月 +50%，4-6月 +30%，6-9月 +10%</li>
               <li>超时强平：持仓超过9个月未止盈则强制平仓</li>
               <li>支持同时持有多笔仓位，每次跌幅触发独立开仓</li>
+              <li>支持美股ETF（QQQ/SPY等，数据源Yahoo）和加密货币（BTC/ETH，数据源OKX）</li>
             </ul>
           </Paragraph>
         </Card>
@@ -413,16 +422,22 @@ export default function QQQLeaps() {
               <Tabs items={[
                 {
                   key: 'trades',
-                  label: `交易记录 (${trades.length}笔)`,
+                  label: `交易记录 (${trades.filter(t => t.action !== 'MTM').length}笔, 含${trades.filter(t => t.action === 'MTM').length}条盯市)`,
                   children: (
-                    <Table
-                      dataSource={trades}
-                      rowKey={(r, i) => `${r.date}-${r.action}-${i}`}
-                      size="small"
-                      pagination={{ pageSize: 20, showSizeChanger: true }}
-                      scroll={{ x: 1400, y: 500 }}
-                      columns={tradeColumns}
-                    />
+                    <>
+                      <div style={{ marginBottom: 8 }}>
+                        <Switch checked={showMtm} onChange={setShowMtm} size="small" />
+                        <Text style={{ marginLeft: 6, fontSize: 12 }}>显示逐日盯市</Text>
+                      </div>
+                      <Table
+                        dataSource={showMtm ? trades : trades.filter((t) => t.action !== 'MTM')}
+                        rowKey={(r, i) => `${r.date}-${r.action}-${i}`}
+                        size="small"
+                        pagination={{ pageSize: 30, showSizeChanger: true, pageSizeOptions: [30, 50, 100, 200] }}
+                        scroll={{ x: 1700, y: 500 }}
+                        columns={tradeColumns}
+                      />
+                    </>
                   ),
                 },
                 {
@@ -442,10 +457,12 @@ export default function QQQLeaps() {
                           sorter: (a, b) => a.equity - b.equity },
                         { title: '现货', dataIndex: 'spot', width: 100,
                           render: (v) => `$${v?.toLocaleString()}` },
-                        { title: '现金', dataIndex: 'cash', width: 110,
-                          render: (v) => `$${v?.toLocaleString()}` },
                         { title: '持仓市值', dataIndex: 'holdings', width: 110,
                           render: (v) => `$${v?.toLocaleString()}` },
+                        { title: '未实现PnL', dataIndex: 'unrealized_pnl', width: 110,
+                          render: (v) => v != null ? `$${v?.toLocaleString()}` : '-' },
+                        { title: '已实现PnL', dataIndex: 'realized_pnl', width: 110,
+                          render: (v) => v != null ? `$${v?.toLocaleString()}` : '-' },
                         { title: '持仓数', dataIndex: 'num_positions', width: 70 },
                         { title: 'IV', dataIndex: 'iv', width: 70,
                           render: (v) => v ? `${(v * 100).toFixed(1)}%` : '-' },
@@ -463,7 +480,8 @@ export default function QQQLeaps() {
                       <Descriptions.Item label="目标Delta">{summary.target_delta}</Descriptions.Item>
                       <Descriptions.Item label="跌幅阈值">{summary.dip_threshold}%</Descriptions.Item>
                       <Descriptions.Item label="IV模式">{summary.iv_mode || '动态(30日滚动)'}</Descriptions.Item>
-                      <Descriptions.Item label="合约乘数">100</Descriptions.Item>
+                      <Descriptions.Item label="数据源">{CRYPTO_TICKERS.has(summary.ticker) ? 'OKX' : 'Yahoo Finance'}</Descriptions.Item>
+                      <Descriptions.Item label="合约乘数">{CRYPTO_TICKERS.has(summary.ticker) ? 1 : 100}</Descriptions.Item>
                       <Descriptions.Item label="初始资金">${summary.initial_capital?.toLocaleString()}</Descriptions.Item>
                       <Descriptions.Item label="止盈规则">0-4月+{tpPct1}%, 4-6月+{tpPct2}%, 6-9月+{tpPct3}%</Descriptions.Item>
                       <Descriptions.Item label="最大持仓">{maxHoldMonths}个月, 最多{maxPositions}笔</Descriptions.Item>
