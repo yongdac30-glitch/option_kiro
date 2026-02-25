@@ -14,6 +14,7 @@ import {
   CloseOutlined, FilterOutlined, ScissorOutlined, PauseCircleOutlined,
   ApiOutlined, CheckCircleOutlined, CloseCircleOutlined,
   HeatMapOutlined,
+  ThunderboltOutlined, PlayCircleOutlined, CameraOutlined,
 } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import dayjs from 'dayjs';
@@ -101,6 +102,20 @@ export default function DataCenter() {
   const [heatmapData, setHeatmapData] = useState(null);
   const [heatmapLoading, setHeatmapLoading] = useState(false);
   const [heatmapUnderlying, setHeatmapUnderlying] = useState('BTC');
+
+  // HF collector
+  const [hfStatus, setHfStatus] = useState(null);
+  const [hfUnderlying, setHfUnderlying] = useState('BTC');
+  const [hfInterval, setHfInterval] = useState(60);
+  const [hfDates, setHfDates] = useState([]);
+  const [hfSelectedDate, setHfSelectedDate] = useState(null);
+  const [hfTimes, setHfTimes] = useState([]);
+  const [hfSelectedTime, setHfSelectedTime] = useState(null);
+  const [hfOptionType, setHfOptionType] = useState('PUT');
+  const [hfData, setHfData] = useState(null);
+  const [hfLoading, setHfLoading] = useState(false);
+  const [hfActionLoading, setHfActionLoading] = useState(false);
+  const hfPollRef = useRef(null);
 
   const loadStats = useCallback(async () => {
     setLoading(true);
@@ -351,7 +366,84 @@ export default function DataCenter() {
     message.info('已停止重试');
   };
 
-  // ── Data availability heatmap ──
+  // ── HF collector handlers ──
+  const loadHfStatus = async () => {
+    try {
+      const data = await dataCenterService.getHFStatus();
+      setHfStatus(data);
+    } catch (e) { /* ignore */ }
+  };
+
+  const loadHfDates = async (ul) => {
+    try {
+      const data = await dataCenterService.getHFDates(ul || hfUnderlying);
+      setHfDates(data.dates || []);
+    } catch (e) { message.error('加载日期失败'); }
+  };
+
+  const loadHfTimes = async (dateStr, ul) => {
+    try {
+      const data = await dataCenterService.getHFTimes(ul || hfUnderlying, dateStr);
+      setHfTimes(data.times || []);
+      if (data.times?.length > 0) {
+        setHfSelectedTime(data.times[0]);
+      }
+    } catch (e) { message.error('加载时间列表失败'); }
+  };
+
+  const loadHfSnapshot = async (snapTime, ot, ul) => {
+    setHfLoading(true);
+    try {
+      const data = await dataCenterService.getHFSnapshotData(
+        ul || hfUnderlying, snapTime || hfSelectedTime, ot || hfOptionType
+      );
+      setHfData(data);
+    } catch (e) {
+      message.error('加载快照失败: ' + e.message);
+    } finally {
+      setHfLoading(false);
+    }
+  };
+
+  const handleHfStart = async () => {
+    setHfActionLoading(true);
+    try {
+      await dataCenterService.startHFCollector(hfUnderlying, hfInterval);
+      message.success('收集器已启动');
+      loadHfStatus();
+    } catch (e) { message.error('启动失败: ' + e.message); }
+    finally { setHfActionLoading(false); }
+  };
+
+  const handleHfStop = async () => {
+    setHfActionLoading(true);
+    try {
+      await dataCenterService.stopHFCollector();
+      message.success('收集器已停止');
+      loadHfStatus();
+    } catch (e) { message.error('停止失败'); }
+    finally { setHfActionLoading(false); }
+  };
+
+  const handleHfManualSnapshot = async () => {
+    setHfActionLoading(true);
+    try {
+      const r = await dataCenterService.manualSnapshot(hfUnderlying);
+      message.success(`快照完成: ${r.saved_count} 条记录`);
+      loadHfStatus();
+      if (hfSelectedDate) loadHfTimes(hfSelectedDate);
+    } catch (e) { message.error('快照失败: ' + e.message); }
+    finally { setHfActionLoading(false); }
+  };
+
+  // Auto-poll HF status every 30s
+  useEffect(() => {
+    loadHfStatus();
+    const iv = setInterval(loadHfStatus, 30000);
+    return () => clearInterval(iv);
+  }, []);
+
+    // ── Data availability heatmap ──
   const loadHeatmapDates = async (ul) => {
     try {
       const data = await dataCenterService.getAvailabilityDates(ul || heatmapUnderlying);
@@ -854,6 +946,191 @@ export default function DataCenter() {
                   {!heatmapData && !heatmapLoading && (
                     <Card size="small">
                       <Text type="secondary">请先点击"加载日期"获取可用日期列表，然后选择日期查看数据可得性</Text>
+                    </Card>
+                  )}
+                </div>
+              ),
+            },
+            {
+              key: 'hf-collector',
+              label: <span><ThunderboltOutlined /> 实时高频收集</span>,
+              children: (
+                <div>
+                  {/* 控制面板 */}
+                  <Card size="small" style={{ marginBottom: 16, background: '#f0f5ff', borderColor: '#adc6ff' }}>
+                    <Row gutter={16} align="middle" style={{ marginBottom: 8 }}>
+                      <Col>
+                        <Select value={hfUnderlying} onChange={(v) => { setHfUnderlying(v); setHfDates([]); setHfTimes([]); setHfData(null); }}
+                          style={{ width: 100 }}
+                          options={[{ value: 'BTC', label: 'BTC' }, { value: 'ETH', label: 'ETH' }]} />
+                      </Col>
+                      <Col>
+                        <Space>
+                          <Text>采集间隔:</Text>
+                          <Select value={hfInterval} onChange={setHfInterval} style={{ width: 100 }}
+                            options={[
+                              { value: 30, label: '30秒' },
+                              { value: 60, label: '1分钟' },
+                              { value: 120, label: '2分钟' },
+                              { value: 300, label: '5分钟' },
+                            ]} />
+                        </Space>
+                      </Col>
+                      <Col>
+                        <Space>
+                          {!hfStatus?.running ? (
+                            <Button type="primary" icon={<PlayCircleOutlined />} onClick={handleHfStart} loading={hfActionLoading}>
+                              启动收集
+                            </Button>
+                          ) : (
+                            <Button danger icon={<PauseCircleOutlined />} onClick={handleHfStop} loading={hfActionLoading}>
+                              停止收集
+                            </Button>
+                          )}
+                          <Button icon={<CameraOutlined />} onClick={handleHfManualSnapshot} loading={hfActionLoading}>
+                            手动快照
+                          </Button>
+                        </Space>
+                      </Col>
+                      <Col>
+                        <Space>
+                          <Tag color={hfStatus?.running ? 'green' : 'default'}>
+                            {hfStatus?.running ? '运行中' : '已停止'}
+                          </Tag>
+                          {hfStatus?.last_snapshot && (
+                            <Text type="secondary" style={{ fontSize: 12 }}>
+                              最后快照: {hfStatus.last_snapshot?.substring(11, 19)} ({hfStatus.last_count}条)
+                              | 总计: {hfStatus.total_snapshots}次
+                            </Text>
+                          )}
+                          {hfStatus?.error && <Tag color="red">错误: {hfStatus.error}</Tag>}
+                        </Space>
+                      </Col>
+                    </Row>
+                    <Row gutter={16} align="middle">
+                      <Col>
+                        <Button size="small" onClick={() => loadHfDates()} icon={<ReloadOutlined />}>加载日期</Button>
+                      </Col>
+                      <Col>
+                        <Select
+                          value={hfSelectedDate}
+                          onChange={(v) => { setHfSelectedDate(v); loadHfTimes(v); }}
+                          style={{ width: 160 }}
+                          showSearch
+                          placeholder="选择日期"
+                          options={hfDates.map(d => ({ value: d.date, label: `${d.date} (${d.snapshots}次)` }))}
+                        />
+                      </Col>
+                      <Col>
+                        <Select
+                          value={hfSelectedTime}
+                          onChange={(v) => { setHfSelectedTime(v); loadHfSnapshot(v); }}
+                          style={{ width: 220 }}
+                          showSearch
+                          placeholder="选择时间点"
+                          options={hfTimes.map(t => {
+                            const label = t.length > 19 ? t.substring(11, 19) : t.substring(11, 19);
+                            return { value: t, label: `${label} UTC` };
+                          })}
+                        />
+                      </Col>
+                      <Col>
+                        <Select value={hfOptionType} onChange={(v) => { setHfOptionType(v); if (hfSelectedTime) loadHfSnapshot(hfSelectedTime, v); }}
+                          style={{ width: 100 }}
+                          options={[{ value: 'PUT', label: 'PUT' }, { value: 'CALL', label: 'CALL' }]} />
+                      </Col>
+                      <Col>
+                        <Button type="primary" icon={<ReloadOutlined />} onClick={() => loadHfSnapshot()} loading={hfLoading}>查询</Button>
+                      </Col>
+                      {hfData?.summary && (
+                        <Col>
+                          <Space>
+                            <Tag color="green">实时: {hfData.summary.real}</Tag>
+                            <Tag color="gold">估算: {hfData.summary.estimated || 0}</Tag>
+                            <Tag color="red">无数据: {hfData.summary.no_data}</Tag>
+                            {hfData.spot_price && <Tag color="blue">现货: ${Number(hfData.spot_price).toLocaleString()}</Tag>}
+                          </Space>
+                        </Col>
+                      )}
+                    </Row>
+                  </Card>
+
+                  {hfLoading && <div style={{ textAlign: 'center', padding: 40 }}><Spin size="large" /></div>}
+
+                  {hfData && !hfLoading && hfData.strikes?.length > 0 && (
+                    <Card size="small" title={`${hfData.underlying} ${hfData.option_type} 实时盘口 - ${hfData.snapshot_time?.substring(0, 19)} UTC`}>
+                      <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 600 }}>
+                        <table style={{ borderCollapse: 'collapse', fontSize: 11 }}>
+                          <thead>
+                            <tr>
+                              <th style={{ padding: '4px 8px', background: '#fafafa', border: '1px solid #e8e8e8', position: 'sticky', left: 0, zIndex: 2, minWidth: 80 }}>
+                                Strike \\ Expiry
+                              </th>
+                              {hfData.expiries.map(exp => (
+                                <th key={exp} style={{ padding: '4px 6px', background: '#fafafa', border: '1px solid #e8e8e8', whiteSpace: 'nowrap', writingMode: 'vertical-lr', textOrientation: 'mixed', height: 80 }}>
+                                  {exp}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(() => {
+                              const cellMap = {};
+                              (hfData.cells || []).forEach(c => { cellMap[`${c.expiry}_${c.strike}`] = c; });
+                              return hfData.strikes.map(strike => {
+                                const isAtm = hfData.spot_price && Math.abs(strike - hfData.spot_price) / hfData.spot_price < 0.05;
+                                return (
+                                  <tr key={strike}>
+                                    <td style={{ padding: '3px 8px', background: isAtm ? '#e6f7ff' : '#fafafa', border: '1px solid #e8e8e8', fontWeight: isAtm ? 'bold' : 'normal', position: 'sticky', left: 0, zIndex: 1, whiteSpace: 'nowrap' }}>
+                                      {Number(strike).toLocaleString()}
+                                      {isAtm && ' \u2605'}
+                                    </td>
+                                    {hfData.expiries.map(exp => {
+                                      const cell = cellMap[`${exp}_${strike}`];
+                                      const status = cell ? cell.status : 'no_data';
+                                      const bgColor = status === 'real' ? '#52c41a' : status === 'estimated' ? '#faad14' : '#cf1322';
+                                      const tipParts = [`${exp} / $${Number(strike).toLocaleString()}`];
+                                      if (cell?.bid_usd != null) tipParts.push(`Bid: $${Number(cell.bid_usd).toFixed(2)}`);
+                                      if (cell?.ask_usd != null) tipParts.push(`Ask: $${Number(cell.ask_usd).toFixed(2)}`);
+                                      if (cell?.last_usd != null) tipParts.push(`Last: $${Number(cell.last_usd).toFixed(2)}`);
+                                      if (cell?.mark_usd != null) tipParts.push(`Mark: $${Number(cell.mark_usd).toFixed(2)}`);
+                                      if (cell?.iv) tipParts.push(`IV: ${(cell.iv > 1 ? cell.iv : cell.iv * 100).toFixed(1)}%`);
+                                      if (cell?.volume != null) tipParts.push(`Vol: ${cell.volume}`);
+                                      if (cell?.oi != null) tipParts.push(`OI: ${cell.oi}`);
+                                      if (status === 'estimated') tipParts.push('(插值估算)');
+                                      const tip = tipParts.join('\n');
+                                      return (
+                                        <Tooltip key={`${exp}-${strike}`} title={<div style={{ whiteSpace: 'pre-line', fontSize: 11 }}>{tip}</div>}>
+                                          <td style={{ width: 20, height: 20, minWidth: 20, background: bgColor, border: '1px solid #e8e8e8', cursor: 'pointer' }} />
+                                        </Tooltip>
+                                      );
+                                    })}
+                                  </tr>
+                                );
+                              });
+                            })()}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div style={{ marginTop: 12 }}>
+                        <Space>
+                          <span><span style={{ display: 'inline-block', width: 14, height: 14, background: '#52c41a', border: '1px solid #e8e8e8', verticalAlign: 'middle', marginRight: 4 }} />实时盘口</span>
+                          <span><span style={{ display: 'inline-block', width: 14, height: 14, background: '#faad14', border: '1px solid #e8e8e8', verticalAlign: 'middle', marginRight: 4 }} />IV插值估算</span>
+                          <span><span style={{ display: 'inline-block', width: 14, height: 14, background: '#cf1322', border: '1px solid #e8e8e8', verticalAlign: 'middle', marginRight: 4 }} />无数据</span>
+                        </Space>
+                      </div>
+                    </Card>
+                  )}
+
+                  {hfData && !hfLoading && (!hfData.strikes || hfData.strikes.length === 0) && (
+                    <Card size="small">
+                      <Text type="secondary">该时间点没有高频数据</Text>
+                    </Card>
+                  )}
+
+                  {!hfData && !hfLoading && (
+                    <Card size="small">
+                      <Text type="secondary">点击"启动收集"开始实时收集数据，或点击"手动快照"获取一次快照。选择日期和时间查看历史快照。</Text>
                     </Card>
                   )}
                 </div>

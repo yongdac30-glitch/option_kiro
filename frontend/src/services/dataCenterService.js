@@ -180,6 +180,70 @@ export const dataCenterService = {
     return resp.data;
   },
 
+  // ── 高频数据收集 ──
+
+  /** 获取收集器状态 */
+  async getHFStatus() {
+    const resp = await api.get('/api/hf-collector/status');
+    return resp.data;
+  },
+
+  /** 启动收集器 */
+  async startHFCollector(underlying, intervalSec) {
+    const resp = await api.post('/api/hf-collector/start', { underlying, interval_sec: intervalSec });
+    return resp.data;
+  },
+
+  /** 停止收集器 */
+  async stopHFCollector() {
+    const resp = await api.post('/api/hf-collector/stop');
+    return resp.data;
+  },
+
+  /** 手动快照 */
+  async manualSnapshot(underlying) {
+    const resp = await api.post('/api/hf-collector/snapshot', { underlying });
+    return resp.data;
+  },
+
+  /** 获取高频数据可用日期 */
+  async getHFDates(underlying) {
+    const resp = await api.get('/api/hf-collector/available-dates', { params: { underlying } });
+    return resp.data;
+  },
+
+  /** 获取某天可用的快照时间 */
+  async getHFTimes(underlying, dateStr) {
+    const params = { underlying };
+    if (dateStr) params.date_str = dateStr;
+    const resp = await api.get('/api/hf-collector/available-times', { params });
+    return resp.data;
+  },
+
+  /** 获取某个快照的数据矩阵 */
+  async getHFSnapshotData(underlying, snapshotTime, optionType) {
+    const params = { underlying };
+    if (snapshotTime) params.snapshot_time = snapshotTime;
+    if (optionType) params.option_type = optionType;
+    const resp = await api.get('/api/hf-collector/snapshot-data', { params });
+    return resp.data;
+  },
+
+  /** 获取高频数据统计 */
+  async getHFStats(underlying) {
+    const resp = await api.get('/api/hf-collector/stats', { params: { underlying } });
+    return resp.data;
+  },
+
+  /** 清除高频数据 */
+  async clearHFData(underlying, beforeDate) {
+    const params = {};
+    if (underlying) params.underlying = underlying;
+    if (beforeDate) params.before_date = beforeDate;
+    const resp = await api.delete('/api/hf-collector/data', { params });
+    return resp.data;
+  },
+
   /** 获取sentinel详情 */
   async getSentinelDetails(underlying) {
     const params = {};

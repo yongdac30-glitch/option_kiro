@@ -6,9 +6,10 @@ from .portfolio import Portfolio
 from .deribit_cache import DeribitPriceCache, DeribitIVCache
 from .okx_xau_tick import OkxXauTick
 from .data_collection import OkxPriceCache, DataCollectionLog
+from .hf_option_tick import HFOptionTick
 
 __all__ = [
     "Position", "MarketPrice", "VolatilityScenario", "Portfolio",
     "DeribitPriceCache", "DeribitIVCache", "OkxXauTick",
-    "OkxPriceCache", "DataCollectionLog",
+    "OkxPriceCache", "DataCollectionLog", "HFOptionTick",
 ]
