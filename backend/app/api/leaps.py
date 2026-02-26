@@ -29,6 +29,7 @@ from app.api.deribit import (
     get_cached_iv_smile,
     save_cached_iv_smile,
     fetch_trades_for_instrument,
+    _fetch_from_hf_db,
     DERIBIT_BASE,
     RATE_DELAY,
     RISK_FREE_RATE as DERIBIT_R,
@@ -73,6 +74,7 @@ class LeapsConfig(BaseModel):
 
     # Real data mode
     use_real_data: bool = Field(default=False, description="使用Deribit真实IV数据")
+    use_hf_data: bool = Field(default=False, description="优先使用高频数据库")
 
 
 class LeapsTradeRecord(BaseModel):
@@ -576,10 +578,12 @@ async def _fetch_single_strike_price(
     option_type: str,
     target_date: date,
     r: float = 0.05,
+    use_hf_data: bool = False,
 ) -> Tuple[float, str, Optional[float]]:
     """Get option price for a single strike, optimized for speed.
 
     Strategy:
+    0. Check HF option tick database (if enabled)
     1. Check DB cache first (instant)
     2. Try chart data for just this one strike (1 API call, ~0.3s)
     3. Try trade data for this strike (1-2 API calls, ~0.6s)
@@ -591,6 +595,13 @@ async def _fetch_single_strike_price(
     if T <= 0.0001:
         intrinsic = max(0, spot - strike) if option_type == "CALL" else max(0, strike - spot)
         return float(intrinsic), "intrinsic", None
+
+    # 0) Check HF option tick database first (if enabled)
+    if use_hf_data:
+        hf_result = _fetch_from_hf_db(underlying, expiry, strike, spot, option_type, target_date)
+        if hf_result is not None:
+            price_usd, src, iv = hf_result
+            return float(price_usd), src, iv
 
     # 1) Check DB cache for this specific strike
     cached = get_cached_iv_smile(underlying, expiry, option_type, target_date)
@@ -754,7 +765,8 @@ async def run_real_leaps_backtest(
         async def _get_price(expiry, strike, spot, today):
             """Fast single-strike price lookup."""
             return await _fetch_single_strike_price(
-                client, underlying_symbol, expiry, strike, spot, "CALL", today, r)
+                client, underlying_symbol, expiry, strike, spot, "CALL", today, r,
+                use_hf_data=config.use_hf_data)
 
         for day_idx, today in enumerate(dates):
             spot = price_map[today]

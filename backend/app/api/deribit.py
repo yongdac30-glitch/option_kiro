@@ -19,6 +19,7 @@ from app.services.pricing import (
 from app.core.database import SessionLocal
 from app.core.config import create_http_client
 from app.models.deribit_cache import DeribitPriceCache, DeribitIVCache
+from app.models.hf_option_tick import HFOptionTick
 
 router = APIRouter(prefix="/api/deribit", tags=["deribit"])
 
@@ -94,6 +95,8 @@ class RealBacktestRequest(BaseModel):
     leaps_close_days_before: int = Field(default=30)       # close N days before expiry (default 30 = 1 month)
     leaps_quantity: float = Field(default=1.0)             # quantity to buy (positive)
     leaps_num_strikes: int = Field(default=15)             # number of strikes to scan around ATM
+    # 高频数据
+    use_hf_data: bool = Field(default=False)               # 优先使用高频数据库
 
 
 class RealTradeRecord(BaseModel):
@@ -831,6 +834,64 @@ async def get_option_price_via_smile(
     return price, "model", default_iv, []
 
 
+# ── HF DB lookup for LEAPS scan ─────────────────────────────────────────────
+
+def _fetch_from_hf_db(
+    underlying: str,
+    expiry: date,
+    strike: float,
+    spot: float,
+    option_type: str,
+    target_date: date,
+) -> Optional[Tuple[float, str, Optional[float]]]:
+    """Try to get option price from HF option tick database.
+
+    Looks for the closest snapshot on target_date. Returns the mark_usd price
+    and iv_mark if available. Returns None if no data found.
+
+    Returns (price_usd, data_source, iv) or None.
+    """
+    from sqlalchemy import func as sa_func
+    db = SessionLocal()
+    try:
+        expiry_str = expiry.isoformat()
+        day_start = datetime(target_date.year, target_date.month, target_date.day)
+        day_end = day_start + timedelta(days=1)
+
+        # Find the latest snapshot on target_date for this instrument
+        row = db.query(HFOptionTick).filter(
+            HFOptionTick.underlying == underlying,
+            HFOptionTick.expiry_date == expiry_str,
+            HFOptionTick.strike == strike,
+            HFOptionTick.option_type == option_type,
+            HFOptionTick.snapshot_time >= day_start,
+            HFOptionTick.snapshot_time < day_end,
+        ).order_by(HFOptionTick.snapshot_time.desc()).first()
+
+        if row is None:
+            return None
+
+        # Prefer mark_usd, fallback to last_usd, then mid of bid/ask
+        price_usd = None
+        if row.mark_usd and row.mark_usd > 0:
+            price_usd = float(row.mark_usd)
+        elif row.last_usd and row.last_usd > 0:
+            price_usd = float(row.last_usd)
+        elif row.bid_usd and row.ask_usd and row.bid_usd > 0 and row.ask_usd > 0:
+            price_usd = float((row.bid_usd + row.ask_usd) / 2.0)
+
+        if price_usd is None or price_usd <= 0:
+            return None
+
+        iv = float(row.iv_mark / 100.0) if row.iv_mark and row.iv_mark > 0 else None
+        return (price_usd, "hf_db", iv)
+    except Exception as e:
+        print(f"[HF DB] Error querying HF data: {e}")
+        return None
+    finally:
+        db.close()
+
+
 # ── Fast single-strike price lookup for LEAPS scan ──────────────────────────
 
 async def _fetch_single_strike_price_fast(
@@ -841,12 +902,16 @@ async def _fetch_single_strike_price_fast(
     spot: float,
     option_type: str,
     target_date: date,
+    use_hf_data: bool = False,
 ) -> Tuple[float, str, Optional[float], List[Tuple[float, float]]]:
     """Get option price for a single strike with minimal API calls.
 
     Optimized for the LEAPS strike scan: first checks DB cache, then
     fetches a full IV smile (which caches all strikes at once), then
     falls back to direct chart/trade API, then BS model.
+
+    If use_hf_data=True, checks HF option tick database FIRST before
+    any other data source.
 
     Returns (price_usd, data_source, iv_used, smile_points).
     smile_points is empty since we don't build a full smile.
@@ -855,6 +920,13 @@ async def _fetch_single_strike_price_fast(
     if T <= 0.0001:
         intrinsic = max(0, spot - strike) if option_type == "CALL" else max(0, strike - spot)
         return float(intrinsic), "intrinsic", None, []
+
+    # 0) Check HF option tick database first (if enabled)
+    if use_hf_data:
+        hf_result = _fetch_from_hf_db(underlying, expiry, strike, spot, option_type, target_date)
+        if hf_result is not None:
+            price_usd, src, iv = hf_result
+            return float(price_usd), src, iv, []
 
     # 1) Check DB cache for this specific strike
     cached = get_cached_iv_smile(underlying, expiry, option_type, target_date)
@@ -1032,6 +1104,7 @@ async def run_real_backtest_engine(
     leaps_close_days_before: int = 30,
     leaps_quantity: float = 1.0,
     leaps_num_strikes: int = 15,
+    use_hf_data: bool = False,
 ) -> RealBacktestResult:
     """Run backtest using Deribit IV smile interpolation for pricing."""
 
@@ -1929,6 +2002,7 @@ async def run_real_backtest_engine(
                             T_close = max(calculate_time_to_expiration(pos["expiry"], today), 0.0001)
                             close_price, close_src, close_iv, close_smile = await _fetch_single_strike_price_fast(
                                 client, underlying, pos["expiry"], pos["strike"], spot, "CALL", today,
+                                use_hf_data=use_hf_data,
                             )
                             # Cash flow: sell back the CALL, receive close_price * qty * mult
                             close_cash_flow = close_price * pos["quantity"] * contract_mult
@@ -2025,6 +2099,7 @@ async def run_real_backtest_engine(
                             instrument = build_instrument_name(underlying, expiry, strike_candidate, "CALL")
                             price, src, iv, smile = await _fetch_single_strike_price_fast(
                                 client, underlying, expiry, strike_candidate, spot, "CALL", today,
+                                use_hf_data=use_hf_data,
                             )
                             if price <= 0:
                                 continue
@@ -2475,6 +2550,7 @@ async def real_backtest_api(request: RealBacktestRequest):
             leaps_close_days_before=request.leaps_close_days_before,
             leaps_quantity=request.leaps_quantity,
             leaps_num_strikes=request.leaps_num_strikes,
+            use_hf_data=request.use_hf_data,
         )
     except HTTPException:
         raise
@@ -2574,6 +2650,7 @@ async def real_backtest_stream_api(request: RealBacktestRequest):
                 leaps_close_days_before=request.leaps_close_days_before,
                 leaps_quantity=request.leaps_quantity,
                 leaps_num_strikes=request.leaps_num_strikes,
+                use_hf_data=request.use_hf_data,
             )
 
         task = asyncio.create_task(run_backtest())

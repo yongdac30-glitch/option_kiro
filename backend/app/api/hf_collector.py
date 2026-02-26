@@ -166,7 +166,7 @@ async def _collector_loop(underlying: str, interval_sec: int):
 
     while _collector_running:
         try:
-            snap_time = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+            snap_time = datetime.utcnow().replace(second=0, microsecond=0)
             data = await _fetch_snapshot(underlying)
             count = await _save_snapshot(
                 underlying, data["spot"], data["instruments"], snap_time
@@ -244,7 +244,7 @@ async def stop_collector():
 @router.post("/snapshot")
 async def manual_snapshot(config: CollectorConfig):
     """手动触发一次快照。"""
-    snap_time = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    snap_time = datetime.utcnow().replace(second=0, microsecond=0)
     data = await _fetch_snapshot(config.underlying)
     count = await _save_snapshot(
         config.underlying, data["spot"], data["instruments"], snap_time
@@ -273,7 +273,7 @@ async def get_available_times(
         )
         if date_str:
             d = date.fromisoformat(date_str)
-            start = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+            start = datetime(d.year, d.month, d.day)
             end = start + timedelta(days=1)
             query = query.filter(
                 HFOptionTick.snapshot_time >= start,
@@ -281,7 +281,7 @@ async def get_available_times(
             )
         else:
             # Default: last 24 hours
-            since = datetime.now(timezone.utc) - timedelta(hours=24)
+            since = datetime.utcnow() - timedelta(hours=24)
             query = query.filter(HFOptionTick.snapshot_time >= since)
 
         rows = query.order_by(HFOptionTick.snapshot_time.desc()).limit(1440).all()
@@ -346,7 +346,7 @@ async def get_snapshot_data(
             snap_dt = latest
         else:
             # Parse and find nearest snapshot
-            target = datetime.fromisoformat(snapshot_time.replace("Z", "+00:00"))
+            target = datetime.fromisoformat(snapshot_time.replace("Z", "").replace("+00:00", ""))
             # Find closest snapshot within 2 minutes
             window_start = target - timedelta(minutes=2)
             window_end = target + timedelta(minutes=2)
@@ -542,10 +542,62 @@ async def clear_hf_data(
             query = query.filter(HFOptionTick.underlying == underlying)
         if before_date:
             d = date.fromisoformat(before_date)
-            dt = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+            dt = datetime(d.year, d.month, d.day)
             query = query.filter(HFOptionTick.snapshot_time < dt)
         count = query.delete()
         db.commit()
         return {"message": f"已删除 {count} 条记录", "count": count}
+    finally:
+        db.close()
+
+
+@router.get("/instrument-series")
+async def get_instrument_series(
+    underlying: str = "BTC",
+    expiry_date: str = "",
+    strike: float = 0,
+    option_type: str = "PUT",
+):
+    """获取某个期权合约的全部时间序列数据（所有日期拼接）。"""
+    db = SessionLocal()
+    try:
+        query = db.query(HFOptionTick).filter(
+            HFOptionTick.underlying == underlying,
+            HFOptionTick.expiry_date == expiry_date,
+            HFOptionTick.strike == strike,
+            HFOptionTick.option_type == option_type,
+        )
+        rows = query.order_by(HFOptionTick.snapshot_time.asc()).limit(50000).all()
+
+        suffix = "P" if option_type == "PUT" else "C"
+        instrument = f"{underlying}-{expiry_date}-{int(strike)}-{suffix}" if rows == [] else (rows[0].instrument_name if rows else "")
+
+        series = []
+        for r in rows:
+            series.append({
+                "time": r.snapshot_time.isoformat() if hasattr(r.snapshot_time, 'isoformat') else str(r.snapshot_time),
+                "bid_usd": r.bid_usd,
+                "ask_usd": r.ask_usd,
+                "last_usd": r.last_usd,
+                "mark_usd": r.mark_usd,
+                "bid": r.bid_price,
+                "ask": r.ask_price,
+                "last": r.last_price,
+                "mark": r.mark_price,
+                "iv": r.iv_mark,
+                "volume": r.volume_24h,
+                "oi": r.open_interest,
+                "spot": r.spot_price,
+            })
+
+        return {
+            "underlying": underlying,
+            "expiry_date": expiry_date,
+            "strike": strike,
+            "option_type": option_type,
+            "instrument": instrument,
+            "count": len(series),
+            "series": series,
+        }
     finally:
         db.close()

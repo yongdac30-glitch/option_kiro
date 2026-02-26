@@ -18,6 +18,10 @@ import {
 } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import dayjs from 'dayjs';
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid,
+  Tooltip as RTooltip, Legend, ResponsiveContainer,
+} from 'recharts';
 import { dataCenterService } from '../services/dataCenterService';
 
 const { Content } = Layout;
@@ -116,6 +120,12 @@ export default function DataCenter() {
   const [hfLoading, setHfLoading] = useState(false);
   const [hfActionLoading, setHfActionLoading] = useState(false);
   const hfPollRef = useRef(null);
+
+  // HF instrument time series chart
+  const [hfSeriesInstrument, setHfSeriesInstrument] = useState(null); // {expiry, strike, option_type}
+  const [hfSeriesData, setHfSeriesData] = useState(null);
+  const [hfSeriesLoading, setHfSeriesLoading] = useState(false);
+  const [hfSeriesUnit, setHfSeriesUnit] = useState('usd'); // 'usd' or 'btc'
 
   const loadStats = useCallback(async () => {
     setLoading(true);
@@ -431,17 +441,41 @@ export default function DataCenter() {
       const r = await dataCenterService.manualSnapshot(hfUnderlying);
       message.success(`快照完成: ${r.saved_count} 条记录`);
       loadHfStatus();
+      loadHfDates();
       if (hfSelectedDate) loadHfTimes(hfSelectedDate);
     } catch (e) { message.error('快照失败: ' + e.message); }
     finally { setHfActionLoading(false); }
   };
 
-  // Auto-poll HF status every 30s
+  // Load instrument time series for the chart
+  const loadHfSeries = async (expiry, strike, optionType) => {
+    setHfSeriesLoading(true);
+    setHfSeriesInstrument({ expiry, strike, option_type: optionType || hfOptionType });
+    try {
+      const data = await dataCenterService.getHFInstrumentSeries(
+        hfUnderlying, expiry, strike, optionType || hfOptionType
+      );
+      setHfSeriesData(data);
+    } catch (e) {
+      message.error('加载时间序列失败: ' + e.message);
+    } finally {
+      setHfSeriesLoading(false);
+    }
+  };
+
+  // Auto-poll HF status + refresh times when collector is running
   useEffect(() => {
     loadHfStatus();
-    const iv = setInterval(loadHfStatus, 30000);
+    const iv = setInterval(() => {
+      loadHfStatus();
+      // Auto-refresh dates and times when collector is running
+      if (hfStatus?.running) {
+        loadHfDates();
+        if (hfSelectedDate) loadHfTimes(hfSelectedDate);
+      }
+    }, 15000);
     return () => clearInterval(iv);
-  }, []);
+  }, [hfStatus?.running, hfSelectedDate]);
 
     // ── Data availability heatmap ──
   const loadHeatmapDates = async (ul) => {
@@ -1058,6 +1092,7 @@ export default function DataCenter() {
                   {hfLoading && <div style={{ textAlign: 'center', padding: 40 }}><Spin size="large" /></div>}
 
                   {hfData && !hfLoading && hfData.strikes?.length > 0 && (
+                    <>
                     <Card size="small" title={`${hfData.underlying} ${hfData.option_type} 实时盘口 - ${hfData.snapshot_time?.substring(0, 19)} UTC`}>
                       <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 600 }}>
                         <table style={{ borderCollapse: 'collapse', fontSize: 11 }}>
@@ -1101,7 +1136,14 @@ export default function DataCenter() {
                                       const tip = tipParts.join('\n');
                                       return (
                                         <Tooltip key={`${exp}-${strike}`} title={<div style={{ whiteSpace: 'pre-line', fontSize: 11 }}>{tip}</div>}>
-                                          <td style={{ width: 20, height: 20, minWidth: 20, background: bgColor, border: '1px solid #e8e8e8', cursor: 'pointer' }} />
+                                          <td
+                                            onClick={() => { if (status === 'real') loadHfSeries(exp, strike); }}
+                                            style={{
+                                              width: 20, height: 20, minWidth: 20, background: bgColor,
+                                              border: (hfSeriesInstrument?.expiry === exp && hfSeriesInstrument?.strike === strike) ? '2px solid #1890ff' : '1px solid #e8e8e8',
+                                              cursor: status === 'real' ? 'pointer' : 'default',
+                                            }}
+                                          />
                                         </Tooltip>
                                       );
                                     })}
@@ -1117,9 +1159,67 @@ export default function DataCenter() {
                           <span><span style={{ display: 'inline-block', width: 14, height: 14, background: '#52c41a', border: '1px solid #e8e8e8', verticalAlign: 'middle', marginRight: 4 }} />实时盘口</span>
                           <span><span style={{ display: 'inline-block', width: 14, height: 14, background: '#faad14', border: '1px solid #e8e8e8', verticalAlign: 'middle', marginRight: 4 }} />IV插值估算</span>
                           <span><span style={{ display: 'inline-block', width: 14, height: 14, background: '#cf1322', border: '1px solid #e8e8e8', verticalAlign: 'middle', marginRight: 4 }} />无数据</span>
+                          <Text type="secondary" style={{ marginLeft: 16, fontSize: 12 }}>点击绿色格子查看该期权的时间序列图→</Text>
                         </Space>
                       </div>
                     </Card>
+
+                    {/* 期权时间序列图 */}
+                    {hfSeriesInstrument && (
+                      <Card size="small" style={{ marginTop: 16 }}
+                        title={
+                          <Space>
+                            <LineChartOutlined />
+                            <span>{hfSeriesData?.instrument || `${hfSeriesInstrument.expiry} / ${Number(hfSeriesInstrument.strike).toLocaleString()} ${hfSeriesInstrument.option_type}`}</span>
+                            <Tag color="blue">{hfSeriesData?.count || 0} 个数据点</Tag>
+                          </Space>
+                        }
+                        extra={
+                          <Space>
+                            <Select value={hfSeriesUnit} onChange={setHfSeriesUnit} size="small" style={{ width: 90 }}
+                              options={[{ value: 'usd', label: 'USD' }, { value: 'btc', label: 'BTC' }]} />
+                            <Button size="small" icon={<ReloadOutlined />} onClick={() => loadHfSeries(hfSeriesInstrument.expiry, hfSeriesInstrument.strike, hfSeriesInstrument.option_type)} loading={hfSeriesLoading}>刷新</Button>
+                            <Button size="small" onClick={() => { setHfSeriesInstrument(null); setHfSeriesData(null); }}>关闭</Button>
+                          </Space>
+                        }
+                      >
+                        {hfSeriesLoading && <div style={{ textAlign: 'center', padding: 40 }}><Spin /></div>}
+                        {hfSeriesData && !hfSeriesLoading && hfSeriesData.series?.length > 0 && (
+                          <ResponsiveContainer width="100%" height={350}>
+                            <LineChart data={hfSeriesData.series.map(p => ({
+                              ...p,
+                              time_label: p.time ? p.time.substring(5, 7) + '/' + p.time.substring(8, 10) + ' ' + p.time.substring(11, 16) : '',
+                              bid_val: hfSeriesUnit === 'usd' ? p.bid_usd : p.bid,
+                              ask_val: hfSeriesUnit === 'usd' ? p.ask_usd : p.ask,
+                              last_val: hfSeriesUnit === 'usd' ? p.last_usd : p.last,
+                              mark_val: hfSeriesUnit === 'usd' ? p.mark_usd : p.mark,
+                            }))}>
+                              <CartesianGrid strokeDasharray="3 3" />
+                              <XAxis dataKey="time_label" tick={{ fontSize: 10 }} />
+                              <YAxis tick={{ fontSize: 10 }} domain={['auto', 'auto']}
+                                tickFormatter={(v) => hfSeriesUnit === 'usd' ? `$${Number(v).toLocaleString()}` : Number(v).toFixed(4)} />
+                              <RTooltip
+                                contentStyle={{ fontSize: 11 }}
+                                formatter={(val, name) => {
+                                  if (val == null) return ['-', name];
+                                  return [hfSeriesUnit === 'usd' ? `$${Number(val).toFixed(2)}` : Number(val).toFixed(6), name];
+                                }}
+                                labelFormatter={(label) => `时间: ${label} UTC`}
+                              />
+                              <Legend wrapperStyle={{ fontSize: 11 }} />
+                              <Line type="monotone" dataKey="bid_val" name="Bid" stroke="#52c41a" dot={false} strokeWidth={1.5} connectNulls />
+                              <Line type="monotone" dataKey="ask_val" name="Ask" stroke="#f5222d" dot={false} strokeWidth={1.5} connectNulls />
+                              <Line type="monotone" dataKey="last_val" name="Last" stroke="#1890ff" dot={false} strokeWidth={2} connectNulls />
+                              <Line type="monotone" dataKey="mark_val" name="Mark" stroke="#722ed1" dot={false} strokeWidth={1} strokeDasharray="5 5" connectNulls />
+                            </LineChart>
+                          </ResponsiveContainer>
+                        )}
+                        {hfSeriesData && !hfSeriesLoading && (!hfSeriesData.series || hfSeriesData.series.length === 0) && (
+                          <Text type="secondary">该期权在当天没有时间序列数据</Text>
+                        )}
+                      </Card>
+                    )}
+                    </>
                   )}
 
                   {hfData && !hfLoading && (!hfData.strikes || hfData.strikes.length === 0) && (

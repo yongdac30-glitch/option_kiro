@@ -56,6 +56,7 @@ export default function LeapsStrategy() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [useRealData, setUseRealData] = useState(false);
+  const [useHfData, setUseHfData] = useState(false);
   const [streamProgress, setStreamProgress] = useState(null);
   const abortRef = useRef(null);
 
@@ -92,6 +93,7 @@ export default function LeapsStrategy() {
       position_size_pct: values.position_size_pct / 100,
       cooldown_days: values.cooldown_days,
       use_real_data: useRealData,
+      use_hf_data: useHfData,
     };
 
     if (useRealData) {
@@ -227,6 +229,18 @@ export default function LeapsStrategy() {
                   {useRealData && <Tag color="green">Deribit IV Smile</Tag>}
                 </Space>
               </AntTooltip>
+              <Divider type="vertical" />
+              <Space>
+                <Switch
+                  checked={useHfData}
+                  onChange={setUseHfData}
+                  checkedChildren="高频数据优先"
+                  unCheckedChildren="仅缓存"
+                  disabled={loading}
+                  size="small"
+                />
+                {useHfData && <Tag color="gold">HF</Tag>}
+              </Space>
             </Space>
           }>
             <Form

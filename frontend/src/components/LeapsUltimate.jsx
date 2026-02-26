@@ -35,6 +35,7 @@ export default function LeapsUltimate() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [useRealData, setUseRealData] = useState(true);
+  const [useHfData, setUseHfData] = useState(false);
   const [streamProgress, setStreamProgress] = useState(null);
   const abortRef = useRef(null);
   const [liveScan, setLiveScan] = useState(null);
@@ -89,6 +90,7 @@ export default function LeapsUltimate() {
       num_strikes: values.num_strikes,
       open_interval_days: values.open_interval_days,
       use_real_data: useRealData,
+      use_hf_data: useHfData,
     };
 
     try {
@@ -211,6 +213,18 @@ export default function LeapsUltimate() {
                   disabled={loading}
                 />
                 {useRealData && <Tag color="green">真实IV</Tag>}
+              </Space>
+              <Divider type="vertical" />
+              <Space>
+                <Switch
+                  checked={useHfData}
+                  onChange={setUseHfData}
+                  checkedChildren="高频数据优先"
+                  unCheckedChildren="仅缓存"
+                  disabled={loading}
+                  size="small"
+                />
+                {useHfData && <Tag color="gold">HF</Tag>}
               </Space>
             </Space>
           }>

@@ -5,7 +5,7 @@
 import { useState, useEffect } from 'react';
 import {
   Layout, Card, Form, Select, InputNumber, DatePicker, Button,
-  Row, Col, Typography, Space, Table, Tag, Statistic, Divider, message, Spin,
+  Row, Col, Typography, Space, Table, Tag, Statistic, Divider, message, Spin, Switch,
   Modal, Input, Popconfirm, Alert, Empty, Progress, Tabs, Collapse,
 } from 'antd';
 import {
@@ -193,6 +193,7 @@ export default function RealBacktest() {
   const [leapsCloseDaysBefore, setLeapsCloseDaysBefore] = useState(30);
   const [leapsQuantity, setLeapsQuantity] = useState(1);
   const [leapsNumStrikes, setLeapsNumStrikes] = useState(15);
+  const [useHfData, setUseHfData] = useState(false);
 
   useEffect(() => { setSavedStrategies(loadStrategies()); }, []);
 
@@ -311,6 +312,7 @@ export default function RealBacktest() {
         leaps_close_days_before: leapsCloseDaysBefore,
         leaps_quantity: leapsQuantity,
         leaps_num_strikes: leapsNumStrikes,
+        use_hf_data: useHfData,
       };
       deribitService.runRealBacktestStream(
         params,
@@ -1186,6 +1188,10 @@ export default function RealBacktest() {
                 </Button>
               )}
 
+              <Form.Item label="高频数据">
+                <Switch checked={useHfData} onChange={setUseHfData} checkedChildren="优先HF" unCheckedChildren="仅缓存" disabled={loading} />
+                {useHfData && <Tag color="gold" style={{ marginLeft: 8 }}>HF</Tag>}
+              </Form.Item>
               <Form.Item>
                 <Button type="primary" htmlType="submit" loading={loading} icon={<DatabaseOutlined />} size="large" block
                   style={{ background: activeTab === 'leaps' ? '#1890ff' : activeTab === 'grid' ? '#2f54eb' : activeTab === 'wheel' ? '#fa541c' : activeTab === 'vol' ? '#722ed1' : activeTab === 'rollput' ? '#13c2c2' : activeTab === 'hedgeput' ? '#eb2f96' : activeTab !== 'basic' ? '#faad14' : '#52c41a', borderColor: activeTab === 'leaps' ? '#1890ff' : activeTab === 'grid' ? '#2f54eb' : activeTab === 'wheel' ? '#fa541c' : activeTab === 'vol' ? '#722ed1' : activeTab === 'rollput' ? '#13c2c2' : activeTab === 'hedgeput' ? '#eb2f96' : activeTab !== 'basic' ? '#faad14' : '#52c41a' }}>

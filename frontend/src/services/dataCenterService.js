@@ -235,6 +235,13 @@ export const dataCenterService = {
     return resp.data;
   },
 
+  /** 获取期权合约时间序列 */
+  async getHFInstrumentSeries(underlying, expiryDate, strike, optionType) {
+    const params = { underlying, expiry_date: expiryDate, strike, option_type: optionType };
+    const resp = await api.get('/api/hf-collector/instrument-series', { params });
+    return resp.data;
+  },
+
   /** 清除高频数据 */
   async clearHFData(underlying, beforeDate) {
     const params = {};

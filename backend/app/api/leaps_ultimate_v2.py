@@ -54,6 +54,7 @@ class LeapsV2Config(BaseModel):
     quantity: float = Field(default=1.0)
     num_strikes: int = Field(default=15)
     open_interval_days: int = Field(default=30)
+    use_hf_data: bool = Field(default=False, description="优先使用高频数据库")
 
 
 # ── Core backtest engine ─────────────────────────────────────────────
@@ -89,7 +90,8 @@ async def run_leaps_v2(
         async def _get_price(expiry, strike, spot, today):
             if use_real_data:
                 price, src, iv, _ = await _fetch_single_strike_price_fast(
-                    client, underlying, expiry, strike, spot, "CALL", today)
+                    client, underlying, expiry, strike, spot, "CALL", today,
+                    use_hf_data=config.use_hf_data)
                 return float(price), src, iv
             else:
                 T = calculate_time_to_expiration(expiry, today)
@@ -705,6 +707,7 @@ class BacktestV2Request(BaseModel):
     num_strikes: int = Field(default=15)
     open_interval_days: int = Field(default=30)
     use_real_data: bool = Field(default=True)
+    use_hf_data: bool = Field(default=False)
 
 
 @router.post("/backtest-stream")
@@ -726,6 +729,7 @@ async def leaps_v2_stream(req: BacktestV2Request):
         quantity=req.quantity,
         num_strikes=req.num_strikes,
         open_interval_days=req.open_interval_days,
+        use_hf_data=req.use_hf_data,
     )
 
     async def event_generator():
