@@ -183,8 +183,10 @@ export const dataCenterService = {
   // ── 高频数据收集 ──
 
   /** 获取收集器状态 */
-  async getHFStatus() {
-    const resp = await api.get('/api/hf-collector/status');
+  async getHFStatus(underlying) {
+    const params = {};
+    if (underlying) params.underlying = underlying;
+    const resp = await api.get('/api/hf-collector/status', { params });
     return resp.data;
   },
 
@@ -195,8 +197,10 @@ export const dataCenterService = {
   },
 
   /** 停止收集器 */
-  async stopHFCollector() {
-    const resp = await api.post('/api/hf-collector/stop');
+  async stopHFCollector(underlying) {
+    const params = {};
+    if (underlying) params.underlying = underlying;
+    const resp = await api.post('/api/hf-collector/stop', null, { params });
     return resp.data;
   },
 

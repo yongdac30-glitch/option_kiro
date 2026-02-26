@@ -49,13 +49,14 @@ app.include_router(hf_collector.router)
 async def startup_event():
     """Initialize database on startup."""
     init_db()
-    # Auto-start HF collector (BTC, every 60s)
+    # Auto-start HF collectors (BTC + ETH, every 60s)
     from app.api.hf_collector import start_collector, CollectorConfig
-    try:
-        await start_collector(CollectorConfig(underlying="BTC", interval_sec=60))
-        print("[Startup] HF collector auto-started (BTC, 60s)")
-    except Exception as e:
-        print(f"[Startup] HF collector auto-start failed: {e}")
+    for ul in ["BTC", "ETH"]:
+        try:
+            await start_collector(CollectorConfig(underlying=ul, interval_sec=60))
+            print(f"[Startup] HF collector auto-started ({ul}, 60s)")
+        except Exception as e:
+            print(f"[Startup] HF collector auto-start failed ({ul}): {e}")
 
 
 @app.get("/")

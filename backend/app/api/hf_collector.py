@@ -23,18 +23,27 @@ router = APIRouter(prefix="/api/hf-collector", tags=["hf-collector"])
 
 DERIBIT_BASE = "https://www.deribit.com/api/v2"
 
-# ── Background task state ────────────────────────────────────────────
-_collector_task: Optional[asyncio.Task] = None
-_collector_running = False
-_collector_status = {
-    "running": False,
-    "underlying": "BTC",
-    "interval_sec": 60,
-    "last_snapshot": None,
-    "last_count": 0,
-    "total_snapshots": 0,
-    "error": None,
-}
+# ── Background task state (per-underlying) ───────────────────────────
+_collectors: dict = {}  # underlying -> {"task": Task, "running": bool, "status": {...}}
+
+
+def _get_status(underlying: str) -> dict:
+    """Get or create status dict for an underlying."""
+    if underlying not in _collectors:
+        _collectors[underlying] = {
+            "task": None,
+            "running": False,
+            "status": {
+                "running": False,
+                "underlying": underlying,
+                "interval_sec": 60,
+                "last_snapshot": None,
+                "last_count": 0,
+                "total_snapshots": 0,
+                "error": None,
+            },
+        }
+    return _collectors[underlying]["status"]
 
 
 def _parse_instrument_name(name: str):
@@ -159,28 +168,29 @@ async def _save_snapshot(underlying: str, spot: float, instruments: list, snap_t
 
 async def _collector_loop(underlying: str, interval_sec: int):
     """Background loop: fetch + save every interval_sec seconds."""
-    global _collector_running, _collector_status
-    _collector_running = True
-    _collector_status["running"] = True
-    _collector_status["error"] = None
+    col = _collectors[underlying]
+    status = col["status"]
+    col["running"] = True
+    status["running"] = True
+    status["error"] = None
 
-    while _collector_running:
+    while col["running"]:
         try:
             snap_time = datetime.utcnow().replace(second=0, microsecond=0)
             data = await _fetch_snapshot(underlying)
             count = await _save_snapshot(
                 underlying, data["spot"], data["instruments"], snap_time
             )
-            _collector_status["last_snapshot"] = snap_time.isoformat()
-            _collector_status["last_count"] = count
-            _collector_status["total_snapshots"] += 1
-            _collector_status["error"] = None
+            status["last_snapshot"] = snap_time.isoformat()
+            status["last_count"] = count
+            status["total_snapshots"] += 1
+            status["error"] = None
             print(f"[HF] Snapshot {underlying}: {count} ticks at {snap_time.strftime('%H:%M')}")
         except asyncio.CancelledError:
             break
         except Exception as e:
-            _collector_status["error"] = str(e)
-            print(f"[HF] Error: {e}")
+            status["error"] = str(e)
+            print(f"[HF] Error ({underlying}): {e}")
 
         # Sleep until next interval
         try:
@@ -188,8 +198,8 @@ async def _collector_loop(underlying: str, interval_sec: int):
         except asyncio.CancelledError:
             break
 
-    _collector_running = False
-    _collector_status["running"] = False
+    col["running"] = False
+    status["running"] = False
 
 
 # ── API Endpoints ────────────────────────────────────────────────────
@@ -200,45 +210,50 @@ class CollectorConfig(BaseModel):
 
 
 @router.get("/status")
-async def get_status():
+async def get_status(underlying: str = "BTC"):
     """获取收集器状态。"""
-    return _collector_status
+    return _get_status(underlying)
 
 
 @router.post("/start")
 async def start_collector(config: CollectorConfig):
     """启动高频数据收集。"""
-    global _collector_task, _collector_running, _collector_status
-    if _collector_running:
-        return {"message": "收集器已在运行", **_collector_status}
+    underlying = config.underlying
+    _get_status(underlying)  # ensure entry exists
+    col = _collectors[underlying]
 
-    _collector_status["underlying"] = config.underlying
-    _collector_status["interval_sec"] = config.interval_sec
-    _collector_status["total_snapshots"] = 0
+    if col["running"]:
+        return {"message": f"{underlying} 收集器已在运行", **col["status"]}
 
-    _collector_task = asyncio.create_task(
-        _collector_loop(config.underlying, config.interval_sec)
+    col["status"]["underlying"] = underlying
+    col["status"]["interval_sec"] = config.interval_sec
+    col["status"]["total_snapshots"] = 0
+
+    col["task"] = asyncio.create_task(
+        _collector_loop(underlying, config.interval_sec)
     )
-    return {"message": f"已启动 {config.underlying} 高频收集 (间隔 {config.interval_sec}s)"}
+    return {"message": f"已启动 {underlying} 高频收集 (间隔 {config.interval_sec}s)"}
 
 
 @router.post("/stop")
-async def stop_collector():
+async def stop_collector(underlying: str = "BTC"):
     """停止高频数据收集。"""
-    global _collector_task, _collector_running
-    if not _collector_running:
-        return {"message": "收集器未在运行"}
+    _get_status(underlying)
+    col = _collectors[underlying]
 
-    _collector_running = False
-    if _collector_task:
-        _collector_task.cancel()
+    if not col["running"]:
+        return {"message": f"{underlying} 收集器未在运行"}
+
+    col["running"] = False
+    if col["task"]:
+        col["task"].cancel()
         try:
-            await _collector_task
+            await col["task"]
         except asyncio.CancelledError:
             pass
-        _collector_task = None
+        col["task"] = None
 
-    return {"message": "已停止收集"}
+    return {"message": f"已停止 {underlying} 收集"}
 
 
 @router.post("/snapshot")

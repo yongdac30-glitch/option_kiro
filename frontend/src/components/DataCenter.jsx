@@ -379,7 +379,7 @@ export default function DataCenter() {
   // ── HF collector handlers ──
   const loadHfStatus = async () => {
     try {
-      const data = await dataCenterService.getHFStatus();
+      const data = await dataCenterService.getHFStatus(hfUnderlying);
       setHfStatus(data);
     } catch (e) { /* ignore */ }
   };
@@ -428,7 +428,7 @@ export default function DataCenter() {
   const handleHfStop = async () => {
     setHfActionLoading(true);
     try {
-      await dataCenterService.stopHFCollector();
+      await dataCenterService.stopHFCollector(hfUnderlying);
       message.success('收集器已停止');
       loadHfStatus();
     } catch (e) { message.error('停止失败'); }
@@ -475,7 +475,7 @@ export default function DataCenter() {
       }
     }, 15000);
     return () => clearInterval(iv);
-  }, [hfStatus?.running, hfSelectedDate]);
+  }, [hfStatus?.running, hfSelectedDate, hfUnderlying]);
 
     // ── Data availability heatmap ──
   const loadHeatmapDates = async (ul) => {
@@ -994,7 +994,7 @@ export default function DataCenter() {
                   <Card size="small" style={{ marginBottom: 16, background: '#f0f5ff', borderColor: '#adc6ff' }}>
                     <Row gutter={16} align="middle" style={{ marginBottom: 8 }}>
                       <Col>
-                        <Select value={hfUnderlying} onChange={(v) => { setHfUnderlying(v); setHfDates([]); setHfTimes([]); setHfData(null); }}
+                        <Select value={hfUnderlying} onChange={(v) => { setHfUnderlying(v); setHfDates([]); setHfTimes([]); setHfData(null); setHfStatus(null); }}
                           style={{ width: 100 }}
                           options={[{ value: 'BTC', label: 'BTC' }, { value: 'ETH', label: 'ETH' }]} />
                       </Col>
