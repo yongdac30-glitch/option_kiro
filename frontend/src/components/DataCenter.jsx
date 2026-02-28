@@ -463,19 +463,33 @@ export default function DataCenter() {
     }
   };
 
-  // Auto-poll HF status + refresh times when collector is running
+  // Auto-poll HF status every 15s (stable interval, no state in deps)
+  const hfUnderlyingRef = useRef(hfUnderlying);
+  const hfSelectedDateRef = useRef(hfSelectedDate);
+  const hfRunningRef = useRef(false);
+  useEffect(() => { hfUnderlyingRef.current = hfUnderlying; }, [hfUnderlying]);
+  useEffect(() => { hfSelectedDateRef.current = hfSelectedDate; }, [hfSelectedDate]);
+  useEffect(() => { hfRunningRef.current = !!hfStatus?.running; }, [hfStatus?.running]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const data = await dataCenterService.getHFStatus(hfUnderlyingRef.current);
+        if (!cancelled) setHfStatus(data);
+      } catch (_) { /* ignore */ }
+    };
+    poll();
+    const iv = setInterval(poll, 15000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [hfUnderlying]);
+
+  // Reload HF status immediately when switching underlying
   useEffect(() => {
     loadHfStatus();
-    const iv = setInterval(() => {
-      loadHfStatus();
-      // Auto-refresh dates and times when collector is running
-      if (hfStatus?.running) {
-        loadHfDates();
-        if (hfSelectedDate) loadHfTimes(hfSelectedDate);
-      }
-    }, 15000);
-    return () => clearInterval(iv);
-  }, [hfStatus?.running, hfSelectedDate, hfUnderlying]);
+    loadHfDates();
+  }, [hfUnderlying]);
 
     // ── Data availability heatmap ──
   const loadHeatmapDates = async (ul) => {
